@@ -1,0 +1,21 @@
+:root {
+  font-family: Bahnschrift, 'Trebuchet MS', Tahoma, sans-serif;
+  line-height: 1.45;
+  font-weight: 400;
+  color: #102725;
+  background: radial-gradient(circle at 20% 5%, #d9f0e2 0%, #f4f6e8 38%, #d6e6d6 100%);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
