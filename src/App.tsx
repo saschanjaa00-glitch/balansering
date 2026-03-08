@@ -1,9 +1,34 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 
-type RawTable = {
-  columns: string[]
+type SourceTable = {
+  name: string
+  titleLine: string
+  betweenTitleAndRows: string[]
+  rowsMarkerLine: string
+  betweenRowsAndHeader: string[]
+  headerLine: string
+  columnsRaw: string[]
+  columnsSanitized: string[]
   rows: string[][]
+  trailingBlankLines: string[]
+}
+
+type SourceSegment =
+  | {
+      type: 'text'
+      lines: string[]
+    }
+  | {
+      type: 'table'
+      tableName: string
+    }
+
+type SourceDocument = {
+  newline: string
+  hasTrailingNewline: boolean
+  segments: SourceSegment[]
+  tables: Record<string, SourceTable>
 }
 
 type Assignment = {
@@ -50,6 +75,9 @@ type ParsedData = {
   blockBreakdowns: BlockBreakdownRecord[]
   blocks: string[]
   tableNames: string[]
+  sourceDocument: SourceDocument
+  initialAssignmentKeysByStudent: Record<string, string[]>
+  sourceFileName: string
 }
 
 type BalanceChange = {
@@ -203,6 +231,303 @@ function hasDuplicateSubjects(student: StudentRecord): boolean {
 function createDefaultGroupCode(subjectCode: string, block: string): string {
   const suffix = BLOCK_SUFFIX_BY_NAME[block]
   return suffix ? `${subjectCode}${suffix}` : subjectCode
+}
+
+function balanceGroupsWithOffset(
+  students: StudentRecord[],
+  maxCapacityOffset: number = 0,
+  debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void
+): { changes: BalanceChange[]; overcrowdedCount: number } {
+  const changes: BalanceChange[] = []
+  const debugGroups: Array<{ key: string; count: number; maxCap: number; status: string }> = []
+
+  // Build group occupancy map: key = "subjectCode|groupCode|block", value = [studentIds]
+  const groupOccupancy = new Map<string, string[]>()
+
+  students.forEach((student) => {
+    student.assignments.forEach((assignment) => {
+      const key = `${assignment.subjectCode}|${assignment.groupCode}|${assignment.block}`
+      if (!groupOccupancy.has(key)) {
+        groupOccupancy.set(key, [])
+      }
+      groupOccupancy.get(key)?.push(student.id)
+    })
+  })
+
+  // Find overcrowded groups
+  const overcrowded: Array<{ key: string; count: number; studentIds: string[] }> = []
+  groupOccupancy.forEach((studentIds, key) => {
+    const [subjectCode] = key.split('|')
+    const subjectName = students
+      .flatMap((s) => s.assignments)
+      .find((a) => a.subjectCode === subjectCode)?.subjectName || 'UKJENT'
+
+    const maxCap = getMaxCapacityForSubject(subjectName) + maxCapacityOffset
+    const status = studentIds.length > maxCap ? `OVERFULL (${studentIds.length} > ${maxCap})` : `OK (${studentIds.length} ≤ ${maxCap})`
+    
+    debugGroups.push({ key, count: studentIds.length, maxCap, status })
+
+    if (subjectName !== 'UKJENT' && studentIds.length > maxCap) {
+      overcrowded.push({ key, count: studentIds.length, studentIds })
+    }
+  })
+
+  if (debugCallback) {
+    debugCallback(debugGroups)
+  }
+
+  // Helper to try a specific swap type for a student
+  const trySwapForStudent = (
+    studentId: string,
+    subjectCode: string,
+    groupCode: string,
+    block: string,
+    student: StudentRecord,
+    subjectName: string,
+    maxCap: number,
+    swapType: 'simple' | 'double' | 'triple'
+  ): boolean => {
+    const blockAssignments = new Map<string, { subjectCode: string; subjectName: string; groupCode: string }[]>()
+    student.assignments.forEach((a) => {
+      if (!blockAssignments.has(a.block)) {
+        blockAssignments.set(a.block, [])
+      }
+      blockAssignments.get(a.block)?.push(a)
+    })
+
+    const blocks = Array.from(blockAssignments.keys())
+    if (blocks.length === 0) return false
+
+    if (swapType === 'simple') {
+      // Try to move to a block we don't already use
+      const blockSet = new Set(blocks)
+      for (const [otherKey, occupants] of groupOccupancy.entries()) {
+        const [otherSubject, otherGroupCode, otherBlock] = otherKey.split('|')
+        if (otherSubject === subjectCode && !blockSet.has(otherBlock) && occupants.length < maxCap) {
+          changes.push({
+            studentId,
+            studentName: student.fullName,
+            subjectCode,
+            subjectName,
+            fromGroupCode: groupCode,
+            fromBlock: block,
+            toGroupCode: otherGroupCode,
+            toBlock: otherBlock,
+          })
+
+          const key = `${subjectCode}|${groupCode}|${block}`
+          const idx = groupOccupancy.get(key)?.indexOf(studentId) ?? -1
+          if (idx !== -1) groupOccupancy.get(key)?.splice(idx, 1)
+          if (!groupOccupancy.has(otherKey)) groupOccupancy.set(otherKey, [])
+          groupOccupancy.get(otherKey)?.push(studentId)
+          return true
+        }
+      }
+    } else if (swapType === 'double' || swapType === 'triple') {
+      // Try N-way swaps
+      const swapLength = swapType === 'double' ? 2 : 3
+      if (tryNWaySwap(studentId, subjectCode, block, student, blockAssignments, swapLength)) {
+        return true
+      }
+    }
+
+    return false
+  }
+
+  // Helper to try N-way swaps
+  const tryNWaySwap = (
+    studentId: string,
+    sourceSubjectCode: string,
+    sourceBlock: string,
+    student: StudentRecord,
+    blockAssignments: Map<string, { subjectCode: string; subjectName: string; groupCode: string }[]>,
+    swapLength: number
+  ): boolean => {
+    const blocks = Array.from(blockAssignments.keys())
+    const sourceBlockIdx = blocks.indexOf(sourceBlock)
+    if (sourceBlockIdx === -1) return false
+
+    // Generate all possible cycles of the given length starting from source block
+    const generateCycles = (start: number, length: number, visited: Set<number> = new Set()): number[][] => {
+      if (length === 0) return [[]]
+      if (length === 1) return [[start]]
+
+      const result: number[][] = []
+      for (let i = 0; i < blocks.length; i++) {
+        if (i === start || visited.has(i)) continue
+        const newVisited = new Set(visited)
+        newVisited.add(i)
+        const subCycles = generateCycles(i, length - 1, newVisited)
+        for (const cycle of subCycles) {
+          result.push([start, ...cycle])
+        }
+      }
+      return result
+    }
+
+    const cycles = generateCycles(sourceBlockIdx, swapLength)
+
+    for (const cycle of cycles) {
+      let isValid = true
+      const cycleChanges: BalanceChange[] = []
+
+      for (let i = 0; i < cycle.length; i++) {
+        const fromBlockIdx = cycle[i]
+        const toBlockIdx = cycle[(i + 1) % cycle.length]
+        const fromBlock = blocks[fromBlockIdx]
+        const toBlock = blocks[toBlockIdx]
+
+        const assignments = blockAssignments.get(fromBlock) || []
+        if (assignments.length === 0) {
+          isValid = false
+          break
+        }
+
+        let targetSubject = assignments[0]
+        if (i === 0) {
+          targetSubject = assignments.find((a) => a.subjectCode === sourceSubjectCode) || assignments[0]
+        }
+
+        const targetSubjectName = targetSubject.subjectName
+        const targetMaxCap = getMaxCapacityForSubject(targetSubjectName) + maxCapacityOffset
+        const groupsInToBlock: Array<{ key: string; currentSize: number }> = []
+
+        groupOccupancy.forEach((occupants, key) => {
+          const [subCode, , blockName] = key.split('|')
+          if (subCode === targetSubject.subjectCode && blockName === toBlock) {
+            groupsInToBlock.push({ key, currentSize: occupants.length })
+          }
+        })
+
+        if (groupsInToBlock.length === 0 || Math.min(...groupsInToBlock.map((g) => g.currentSize)) >= targetMaxCap) {
+          isValid = false
+          break
+        }
+
+        const targetGroup = groupsInToBlock.find((g) => g.currentSize < targetMaxCap)
+        if (!targetGroup) {
+          isValid = false
+          break
+        }
+
+        cycleChanges.push({
+          studentId,
+          studentName: student.fullName,
+          subjectCode: targetSubject.subjectCode,
+          subjectName: targetSubjectName,
+          fromGroupCode: targetSubject.groupCode,
+          fromBlock: fromBlock,
+          toGroupCode: targetGroup.key.split('|')[1],
+          toBlock: toBlock,
+        })
+      }
+
+      if (isValid && cycleChanges.length === swapLength) {
+        for (const change of cycleChanges) {
+          changes.push(change)
+
+          const fromKey = `${change.subjectCode}|${change.fromGroupCode}|${change.fromBlock}`
+          const toKey = `${change.subjectCode}|${change.toGroupCode}|${change.toBlock}`
+
+          const idx = groupOccupancy.get(fromKey)?.indexOf(studentId) ?? -1
+          if (idx !== -1) groupOccupancy.get(fromKey)?.splice(idx, 1)
+          if (!groupOccupancy.has(toKey)) groupOccupancy.set(toKey, [])
+          groupOccupancy.get(toKey)?.push(studentId)
+        }
+        return true
+      }
+    }
+
+    return false
+  }
+
+  // Try to rebalance in phases: simple, then double, then triple
+  overcrowded.forEach(({ key, count, studentIds }) => {
+    const [subjectCode, groupCode, block] = key.split('|')
+    const subjectName = students.flatMap((s) => s.assignments).find((a) => a.subjectCode === subjectCode)?.subjectName || ''
+    const maxCap = getMaxCapacityForSubject(subjectName) + maxCapacityOffset
+    const needToMove = count - maxCap
+
+    let moved = 0
+    let remainingStudents = [...studentIds]
+
+    // Phase 1: Try simple swaps for all students
+    remainingStudents = remainingStudents.filter((studentId) => {
+      if (moved >= needToMove) return true
+
+      const student = students.find((s) => s.id === studentId)
+      if (!student) return true
+
+      if (trySwapForStudent(studentId, subjectCode, groupCode, block, student, subjectName, maxCap, 'simple')) {
+        moved++
+        return false
+      }
+      return true
+    })
+
+    // Phase 2: Try double swaps for remaining students
+    remainingStudents = remainingStudents.filter((studentId) => {
+      if (moved >= needToMove) return true
+
+      const student = students.find((s) => s.id === studentId)
+      if (!student) return true
+
+      if (trySwapForStudent(studentId, subjectCode, groupCode, block, student, subjectName, maxCap, 'double')) {
+        moved++
+        return false
+      }
+      return true
+    })
+
+    // Phase 3: Try triple swaps for remaining students
+    remainingStudents.forEach((studentId) => {
+      if (moved >= needToMove) return
+
+      const student = students.find((s) => s.id === studentId)
+      if (!student) return
+
+      if (trySwapForStudent(studentId, subjectCode, groupCode, block, student, subjectName, maxCap, 'triple')) {
+        moved++
+      }
+    })
+  })
+
+  return { changes, overcrowdedCount: overcrowded.length }
+}
+
+function progressiveBalanceGroups(
+  students: StudentRecord[],
+  maxOffset: number,
+  debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void
+): { allChanges: BalanceChange[]; summary: string } {
+  const allChanges: BalanceChange[] = []
+  const offsets = []
+  
+  // Generate offsets from maxOffset down to 0
+  for (let i = maxOffset; i <= 0; i++) {
+    offsets.push(i)
+  }
+
+  // Apply balancing iteratively
+  let currentStudents = students
+  
+  for (const offset of offsets) {
+    const result = balanceGroupsWithOffset(currentStudents, offset, debugCallback)
+    
+    if (result.changes.length > 0) {
+      // Apply the changes to get the new student state for next iteration
+      currentStudents = applyBalanceChanges(currentStudents, result.changes)
+      allChanges.push(...result.changes)
+    } else if (result.overcrowdedCount === 0) {
+      // No more overcrowded groups at this offset, we can stop
+      break
+    }
+  }
+
+  const uniqueStudents = new Set(allChanges.map((c) => c.studentId))
+  const summary = `Progressiv balansering fullført: ${uniqueStudents.size} elev(er) flyttet (${allChanges.length} fagendringer)`
+
+  return { allChanges, summary }
 }
 
 function balanceGroups(students: StudentRecord[], debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void): { changes: BalanceChange[]; overcrowdedCount: number } {
@@ -616,93 +941,130 @@ function decodeBestEffort(fileBuffer: ArrayBuffer): string {
   return win1252BadChars < utf8BadChars ? win1252Text : utf8Text
 }
 
-function extractTables(rawText: string): Map<string, RawTable> {
-  const lines = rawText.replace(/\r\n/gu, '\n').split('\n')
-  const tables = new Map<string, RawTable>()
+function parseSourceDocument(rawText: string): SourceDocument {
+  const newline = rawText.includes('\r\n') ? '\r\n' : '\n'
+  const normalizedLines = rawText.replace(/\r\n/gu, '\n').split('\n')
   const tableHeaderRegex = /^([A-Za-z_]+)\s+\(\d+\)$/u
 
+  const segments: SourceSegment[] = []
+  const tables: Record<string, SourceTable> = {}
+  let bufferedTextLines: string[] = []
+
   let index = 0
-  while (index < lines.length) {
-    const sectionLine = lines[index].trim()
-    const sectionMatch = sectionLine.match(tableHeaderRegex)
-    if (!sectionMatch) {
+  while (index < normalizedLines.length) {
+    const currentLine = normalizedLines[index]
+    const headerMatch = currentLine.trim().match(tableHeaderRegex)
+
+    if (!headerMatch) {
+      bufferedTextLines.push(currentLine)
       index += 1
       continue
     }
 
-    const tableName = sectionMatch[1]
-    index += 1
-    while (index < lines.length && lines[index].trim() !== '[Rows]') {
-      index += 1
+    let rowsMarkerIndex = index + 1
+    while (rowsMarkerIndex < normalizedLines.length && normalizedLines[rowsMarkerIndex].trim() !== '[Rows]') {
+      if (tableHeaderRegex.test(normalizedLines[rowsMarkerIndex].trim())) {
+        break
+      }
+      rowsMarkerIndex += 1
     }
-    if (index >= lines.length) {
+
+    if (rowsMarkerIndex >= normalizedLines.length || normalizedLines[rowsMarkerIndex].trim() !== '[Rows]') {
+      bufferedTextLines.push(currentLine)
+      index += 1
+      continue
+    }
+
+    let headerLineIndex = rowsMarkerIndex + 1
+    while (headerLineIndex < normalizedLines.length && normalizedLines[headerLineIndex].trim() === '') {
+      headerLineIndex += 1
+    }
+
+    if (headerLineIndex >= normalizedLines.length) {
+      bufferedTextLines.push(...normalizedLines.slice(index))
       break
     }
 
-    index += 1
-    while (index < lines.length && lines[index].trim() === '') {
-      index += 1
-    }
-    if (index >= lines.length) {
-      break
+    if (bufferedTextLines.length > 0) {
+      segments.push({ type: 'text', lines: bufferedTextLines })
+      bufferedTextLines = []
     }
 
-    const rawHeaderCells = lines[index].split('\t').map((cell) => sanitizeHeader(cell))
-    const columns = rawHeaderCells.filter((header) => header.length > 0)
-    index += 1
-
-    const rows: string[][] = []
-    while (index < lines.length) {
-      const rawLine = lines[index]
-      const trimmedLine = rawLine.trim()
-
-      if (trimmedLine === '') {
-        index += 1
+    const tableName = headerMatch[1]
+    const rowLines: string[] = []
+    let rowIndex = headerLineIndex + 1
+    while (rowIndex < normalizedLines.length) {
+      const trimmedRow = normalizedLines[rowIndex].trim()
+      if (trimmedRow === '' || tableHeaderRegex.test(trimmedRow)) {
         break
       }
-      if (tableHeaderRegex.test(trimmedLine)) {
-        break
-      }
-
-      const cells = rawLine.split('\t')
-      if (cells.some((cell) => cell.trim() !== '')) {
-        while (cells.length < columns.length) {
-          cells.push('')
-        }
-        rows.push(cells.slice(0, columns.length))
-      }
-      index += 1
+      rowLines.push(normalizedLines[rowIndex])
+      rowIndex += 1
     }
 
-    tables.set(tableName, { columns, rows })
+    const trailingBlankLines: string[] = []
+    while (rowIndex < normalizedLines.length && normalizedLines[rowIndex].trim() === '') {
+      trailingBlankLines.push(normalizedLines[rowIndex])
+      rowIndex += 1
+    }
+
+    const columnsRaw = normalizedLines[headerLineIndex].split('\t')
+    const table: SourceTable = {
+      name: tableName,
+      titleLine: normalizedLines[index],
+      betweenTitleAndRows: normalizedLines.slice(index + 1, rowsMarkerIndex),
+      rowsMarkerLine: normalizedLines[rowsMarkerIndex],
+      betweenRowsAndHeader: normalizedLines.slice(rowsMarkerIndex + 1, headerLineIndex),
+      headerLine: normalizedLines[headerLineIndex],
+      columnsRaw,
+      columnsSanitized: columnsRaw.map((header) => sanitizeHeader(header)),
+      rows: rowLines.map((line) => line.split('\t')),
+      trailingBlankLines,
+    }
+
+    tables[tableName] = table
+    segments.push({ type: 'table', tableName })
+    index = rowIndex
   }
 
-  return tables
+  if (bufferedTextLines.length > 0) {
+    segments.push({ type: 'text', lines: bufferedTextLines })
+  }
+
+  return {
+    newline,
+    hasTrailingNewline: /\r?\n$/u.test(rawText),
+    segments,
+    tables,
+  }
 }
 
-function rowsToObjects(table?: RawTable): Array<Record<string, string>> {
+function rowsToObjects(table?: SourceTable): Array<Record<string, string>> {
   if (!table) {
     return []
   }
 
   return table.rows.map((row) => {
     const objectRow: Record<string, string> = {}
-    table.columns.forEach((column, i) => {
+    table.columnsSanitized.forEach((column, i) => {
+      if (!column) {
+        return
+      }
       objectRow[column] = (row[i] || '').trim()
     })
     return objectRow
   })
 }
 
-function parseNovaschemExport(rawText: string): ParsedData {
-  const tables = extractTables(rawText)
-  const tableNames = Array.from(tables.keys()).sort((a, b) => a.localeCompare(b))
+function parseNovaschemExport(rawText: string, sourceFileName: string): ParsedData {
+  const sourceDocument = parseSourceDocument(rawText)
+  const tableNames = Object.keys(sourceDocument.tables).sort((a, b) => a.localeCompare(b))
 
-  const studentRows = rowsToObjects(tables.get('Student'))
-  const subjectRows = rowsToObjects(tables.get('Subject'))
-  const groupRows = rowsToObjects(tables.get('Group'))
-  const groupStudentRows = rowsToObjects(tables.get('Group_Student'))
-  const taRows = rowsToObjects(tables.get('TA'))
+  const studentRows = rowsToObjects(sourceDocument.tables.Student)
+  const subjectRows = rowsToObjects(sourceDocument.tables.Subject)
+  const groupRows = rowsToObjects(sourceDocument.tables.Group)
+  const groupStudentRows = rowsToObjects(sourceDocument.tables.Group_Student)
+  const taRows = rowsToObjects(sourceDocument.tables.TA)
 
   const studentsById = new Map<string, { fullName: string; email: string }>()
   studentRows.forEach((row) => {
@@ -989,6 +1351,13 @@ function parseNovaschemExport(rawText: string): ParsedData {
     }))
     .sort((a, b) => a.block.localeCompare(b.block))
 
+  const initialAssignmentKeysByStudent: Record<string, string[]> = {}
+  students.forEach((student) => {
+    initialAssignmentKeysByStudent[student.id] = student.assignments
+      .map((assignment) => `${assignment.subjectCode}|${assignment.groupCode}|${assignment.block}`)
+      .sort((a, b) => a.localeCompare(b))
+  })
+
   return {
     students,
     subjects,
@@ -996,7 +1365,195 @@ function parseNovaschemExport(rawText: string): ParsedData {
     blockBreakdowns,
     blocks,
     tableNames,
+    sourceDocument,
+    initialAssignmentKeysByStudent,
+    sourceFileName,
   }
+}
+
+function isParsedDataExportReady(data: ParsedData | null): data is ParsedData {
+  if (!data) {
+    return false
+  }
+  return Boolean(
+    data.sourceDocument &&
+      Array.isArray(data.sourceDocument.segments) &&
+      data.sourceDocument.tables &&
+      data.initialAssignmentKeysByStudent,
+  )
+}
+
+function cloneTable(table: SourceTable): SourceTable {
+  return {
+    ...table,
+    betweenTitleAndRows: [...table.betweenTitleAndRows],
+    betweenRowsAndHeader: [...table.betweenRowsAndHeader],
+    columnsRaw: [...table.columnsRaw],
+    columnsSanitized: [...table.columnsSanitized],
+    rows: table.rows.map((row) => [...row]),
+    trailingBlankLines: [...table.trailingBlankLines],
+  }
+}
+
+function parseAssignmentKey(key: string): { subjectCode: string; groupCode: string; block: string } {
+  const [subjectCode = '', groupCode = '', block = ''] = key.split('|')
+  return { subjectCode, groupCode, block }
+}
+
+function parseStudentCsv(value: string): string[] {
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => /^\d+$/u.test(item))
+}
+
+function buildExportText(parsedData: ParsedData): string {
+  const sourceDocument = parsedData.sourceDocument
+  const tables: Record<string, SourceTable> = {}
+
+  Object.entries(sourceDocument.tables).forEach(([name, table]) => {
+    tables[name] = cloneTable(table)
+  })
+
+  const currentAssignmentKeysByStudent = new Map<string, Set<string>>()
+  parsedData.students.forEach((student) => {
+    currentAssignmentKeysByStudent.set(
+      student.id,
+      new Set(student.assignments.map((assignment) => `${assignment.subjectCode}|${assignment.groupCode}|${assignment.block}`)),
+    )
+  })
+
+  const removalsByPair = new Map<string, number>()
+  const additionsByPair = new Map<string, number>()
+  const affectedGroups = new Set<string>()
+
+  const allStudentIds = new Set<string>([
+    ...Object.keys(parsedData.initialAssignmentKeysByStudent),
+    ...Array.from(currentAssignmentKeysByStudent.keys()),
+  ])
+
+  allStudentIds.forEach((studentId) => {
+    const originalKeys = new Set(parsedData.initialAssignmentKeysByStudent[studentId] || [])
+    const currentKeys = currentAssignmentKeysByStudent.get(studentId) || new Set<string>()
+
+    originalKeys.forEach((key) => {
+      if (currentKeys.has(key)) {
+        return
+      }
+      const { groupCode } = parseAssignmentKey(key)
+      const pairKey = `${groupCode}|${studentId}`
+      removalsByPair.set(pairKey, (removalsByPair.get(pairKey) || 0) + 1)
+      affectedGroups.add(groupCode)
+    })
+
+    currentKeys.forEach((key) => {
+      if (originalKeys.has(key)) {
+        return
+      }
+      const { groupCode } = parseAssignmentKey(key)
+      const pairKey = `${groupCode}|${studentId}`
+      additionsByPair.set(pairKey, (additionsByPair.get(pairKey) || 0) + 1)
+      affectedGroups.add(groupCode)
+    })
+  })
+
+  const groupStudentTable = tables.Group_Student
+  if (groupStudentTable) {
+    const groupColumnIndex = groupStudentTable.columnsSanitized.findIndex((name) => name === 'Group')
+    const studentColumnIndex = groupStudentTable.columnsSanitized.findIndex((name) => name === 'Student')
+
+    if (groupColumnIndex >= 0 && studentColumnIndex >= 0) {
+      const nextRows: string[][] = []
+      const removalsRemaining = new Map(removalsByPair)
+      groupStudentTable.rows.forEach((row) => {
+        const pairKey = `${(row[groupColumnIndex] || '').trim()}|${(row[studentColumnIndex] || '').trim()}`
+        const removalsLeft = removalsRemaining.get(pairKey) || 0
+        if (removalsLeft > 0) {
+          removalsRemaining.set(pairKey, removalsLeft - 1)
+          return
+        }
+        nextRows.push(row)
+      })
+
+      additionsByPair.forEach((count, pairKey) => {
+        const [groupCode, studentId] = pairKey.split('|')
+        for (let i = 0; i < count; i += 1) {
+          const newRow = new Array(groupStudentTable.columnsRaw.length).fill('')
+          newRow[groupColumnIndex] = groupCode
+          newRow[studentColumnIndex] = studentId
+          nextRows.push(newRow)
+        }
+      })
+
+      groupStudentTable.rows = nextRows
+    }
+  }
+
+  const groupTable = tables.Group
+  if (groupTable && affectedGroups.size > 0) {
+    const groupColumnIndex = groupTable.columnsSanitized.findIndex((name) => name === 'Group')
+    const studentColumnIndex = groupTable.columnsSanitized.findIndex((name) => name === 'Student')
+
+    if (groupColumnIndex >= 0 && studentColumnIndex >= 0) {
+      groupTable.rows = groupTable.rows.map((row) => {
+        const groupCode = (row[groupColumnIndex] || '').trim()
+        if (!affectedGroups.has(groupCode)) {
+          return row
+        }
+
+        const nextStudents = parseStudentCsv(row[studentColumnIndex] || '')
+        const studentSet = new Set(nextStudents)
+
+        removalsByPair.forEach((count, pairKey) => {
+          if (count <= 0) {
+            return
+          }
+          const [pairGroupCode, studentId] = pairKey.split('|')
+          if (pairGroupCode === groupCode) {
+            studentSet.delete(studentId)
+          }
+        })
+
+        additionsByPair.forEach((count, pairKey) => {
+          if (count <= 0) {
+            return
+          }
+          const [pairGroupCode, studentId] = pairKey.split('|')
+          if (pairGroupCode === groupCode) {
+            studentSet.add(studentId)
+          }
+        })
+
+        const orderedStudents = [...studentSet].sort((a, b) => Number(a) - Number(b))
+        const nextRow = [...row]
+        nextRow[studentColumnIndex] = orderedStudents.join(',')
+        return nextRow
+      })
+    }
+  }
+
+  const chunks: string[] = []
+  sourceDocument.segments.forEach((segment) => {
+    if (segment.type === 'text') {
+      chunks.push(segment.lines.join(sourceDocument.newline))
+      return
+    }
+
+    const table = tables[segment.tableName] || sourceDocument.tables[segment.tableName]
+    const tableLines = [
+      table.titleLine,
+      ...table.betweenTitleAndRows,
+      table.rowsMarkerLine,
+      ...table.betweenRowsAndHeader,
+      table.headerLine,
+      ...table.rows.map((row) => row.join('\t')),
+      ...table.trailingBlankLines,
+    ]
+    chunks.push(tableLines.join(sourceDocument.newline))
+  })
+
+  const combined = chunks.join(sourceDocument.newline)
+  return sourceDocument.hasTrailingNewline ? `${combined}${sourceDocument.newline}` : combined
 }
 
 function App() {
@@ -1015,9 +1572,10 @@ function App() {
     })
   )
 
-  const [parsedData, setParsedData] = useState<ParsedData | null>(() =>
-    loadFromLocalStorage<ParsedData | null>(STORAGE_KEYS.parsedData, null)
-  )
+  const [parsedData, setParsedData] = useState<ParsedData | null>(() => {
+    const stored = loadFromLocalStorage<ParsedData | null>(STORAGE_KEYS.parsedData, null)
+    return isParsedDataExportReady(stored) ? stored : null
+  })
   const [selectedStudentId, setSelectedStudentId] = useState<string>(persistedUiState.selectedStudentId)
   const [studentQuery, setStudentQuery] = useState<string>(persistedUiState.studentQuery)
   const [subjectQuery, setSubjectQuery] = useState<string>(persistedUiState.subjectQuery)
@@ -1046,6 +1604,8 @@ function App() {
   const [studentAddSubjectCode, setStudentAddSubjectCode] = useState<string>('')
   const [studentAddSubjectBlock, setStudentAddSubjectBlock] = useState<string>('')
   const [pendingRemovalAssignment, setPendingRemovalAssignment] = useState<string>('')
+  const [showProgressiveBalanceDialog, setShowProgressiveBalanceDialog] = useState<boolean>(false)
+  const [progressiveBalanceMaxOffset, setProgressiveBalanceMaxOffset] = useState<number>(-4)
 
   const clearStoredData = (): void => {
     removeFromLocalStorage(STORAGE_KEYS.parsedData)
@@ -1349,6 +1909,34 @@ function App() {
     return groupMemberLookup.get(selectedGroupKey) || []
   }, [groupMemberLookup, selectedGroupKey])
 
+  const handleExport = (): void => {
+    if (!parsedData || !isParsedDataExportReady(parsedData)) {
+      setErrorMessage('Ingen gyldig eksportkilde er lastet. Last opp filen pa nytt for eksport.')
+      return
+    }
+
+    try {
+      const exportText = buildExportText(parsedData)
+      const sourceName = parsedData.sourceFileName || 'novaschem-eksport.txt'
+      const hasTxtExtension = /\.txt$/iu.test(sourceName)
+      const baseName = hasTxtExtension ? sourceName.replace(/\.txt$/iu, '') : sourceName
+      const downloadName = `${baseName}-endret.txt`
+
+      const blob = new Blob([exportText], { type: 'text/plain;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = downloadName
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+      setErrorMessage('')
+    } catch {
+      setErrorMessage('Eksport feilet. Last opp filen pa nytt og forsok igjen.')
+    }
+  }
+
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
     const file = event.target.files?.[0]
     if (!file) {
@@ -1358,7 +1946,7 @@ function App() {
     try {
       const fileBuffer = await file.arrayBuffer()
       const text = decodeBestEffort(fileBuffer)
-      const parsed = parseNovaschemExport(text)
+      const parsed = parseNovaschemExport(text, file.name)
       setParsedData(parsed)
       setSelectedStudentId(parsed.students[0]?.id || '')
       setSelectedGroupKey('')
@@ -1436,6 +2024,9 @@ function App() {
                 Fagvisning
               </button>
             </div>
+            <button type="button" className="export-button" onClick={handleExport}>
+              Eksporter TXT
+            </button>
           </section>
 
           <section className="secondary-controls-row">
@@ -1742,6 +2333,13 @@ function App() {
                     className="balance-button"
                   >
                     Balanser
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowProgressiveBalanceDialog(true)}
+                    className="balance-button"
+                  >
+                    Progressiv balansering
                   </button>
                 </div>
               </div>
@@ -2264,6 +2862,126 @@ function App() {
                             setAddSubjectTargetCode('')
                             setAddSubjectTargetBlock('')
                           }}
+                          className="clear-results-button"
+                        >
+                          Avbryt
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {showProgressiveBalanceDialog && (
+                <div className="modal-overlay" onClick={() => setShowProgressiveBalanceDialog(false)}>
+                  <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+                    <h3>Progressiv balansering</h3>
+                    <p>Velg maksimalt antall elever under kapasitet å tillate før prøving av neste offset.</p>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '1rem' }}>
+                      <div>
+                        <label>
+                          <strong>Maksimalt offset under kapasitet:</strong>
+                        </label>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginTop: '0.5rem' }}>
+                          <input
+                            type="range"
+                            min={-15}
+                            max={0}
+                            value={progressiveBalanceMaxOffset}
+                            onChange={(e) => setProgressiveBalanceMaxOffset(parseInt(e.target.value, 10))}
+                            style={{ flex: 1 }}
+                          />
+                          <span style={{ minWidth: '3rem', textAlign: 'right' }}>
+                            <strong>{progressiveBalanceMaxOffset}</strong>
+                          </span>
+                        </div>
+                        <p style={{ fontSize: '0.85rem', color: '#666', marginTop: '0.5rem' }}>
+                          {progressiveBalanceMaxOffset === 0
+                            ? 'Balansering til full kapasitet'
+                            : `Tillater inntil ${Math.abs(progressiveBalanceMaxOffset)} færre elever enn kapasitet før neste versøk`}
+                        </p>
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!parsedData) return
+
+                            // Calculate original group occupancy
+                            const originalCounts = new Map<string, number>()
+                            parsedData.groupBreakdowns.forEach((item) => {
+                              const key = `${item.subjectCode}|${item.groupCode}|${item.block}`
+                              originalCounts.set(key, item.studentCount)
+                            })
+
+                            // Calculate original block occupancy
+                            const originalBlockCounts = new Map<string, number>()
+                            parsedData.blockBreakdowns.forEach((item) => {
+                              originalBlockCounts.set(item.block, item.studentCount)
+                            })
+
+                            const result = progressiveBalanceGroups(parsedData.students, progressiveBalanceMaxOffset, (groups) => setDebugGroups(groups))
+                            setBalanceResults(result.allChanges)
+                            
+                            // Apply changes to the parsed data
+                            let updatedData = parsedData
+                            if (result.allChanges.length > 0) {
+                              const updatedStudents = applyBalanceChanges(parsedData.students, result.allChanges)
+                              const { groupBreakdowns: newGroupBreakdowns, blockBreakdowns: newBlockBreakdowns } = recalculateBreakdowns(updatedStudents)
+                              updatedData = {
+                                ...parsedData,
+                                students: updatedStudents,
+                                groupBreakdowns: newGroupBreakdowns,
+                                blockBreakdowns: newBlockBreakdowns,
+                              }
+                              setParsedData(updatedData)
+                            }
+
+                            // Calculate new group occupancy and compute deltas
+                            const newCounts = new Map<string, number>()
+                            updatedData.groupBreakdowns.forEach((item) => {
+                              const key = `${item.subjectCode}|${item.groupCode}|${item.block}`
+                              newCounts.set(key, item.studentCount)
+                            })
+
+                            const deltas = new Map<string, number>()
+                            originalCounts.forEach((originalCount, key) => {
+                              const newCount = newCounts.get(key) || 0
+                              const delta = newCount - originalCount
+                              if (delta !== 0) {
+                                deltas.set(key, delta)
+                              }
+                            })
+
+                            // Calculate new block occupancy and compute block deltas
+                            const newBlockCounts = new Map<string, number>()
+                            updatedData.blockBreakdowns.forEach((item) => {
+                              newBlockCounts.set(item.block, item.studentCount)
+                            })
+
+                            const blockDeltas = new Map<string, number>()
+                            originalBlockCounts.forEach((originalCount, block) => {
+                              const newCount = newBlockCounts.get(block) || 0
+                              const delta = newCount - originalCount
+                              if (delta !== 0) {
+                                blockDeltas.set(block, delta)
+                              }
+                            })
+
+                            setBalanceDeltaCounts(deltas)
+                            setBalanceBlockDeltaCounts(blockDeltas)
+                            
+                            setBalanceMessage(result.summary)
+                            setShowProgressiveBalanceDialog(false)
+                          }}
+                          className="balance-button"
+                        >
+                          Kjør progressiv balansering
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowProgressiveBalanceDialog(false)}
                           className="clear-results-button"
                         >
                           Avbryt

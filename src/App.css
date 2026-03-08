@@ -144,6 +144,20 @@
   background: #fafdff;
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.export-button {
+  background: #1f5eb8;
+  border-color: #18498f;
+  color: #f8fbff;
+  padding: 0.55rem 0.9rem;
+  white-space: nowrap;
+}
+
+.export-button:hover {
+  background: #194a91;
 }
 
 .switch-group {
@@ -734,6 +748,15 @@ th {
 
   .secondary-controls-row {
     grid-template-columns: 1fr;
+  }
+
+  .controls-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .export-button {
+    width: 100%;
   }
 
   .hero {
