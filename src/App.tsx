@@ -914,6 +914,10 @@ function App() {
   const [balanceDeltaCounts, setBalanceDeltaCounts] = useState<Map<string, number>>(new Map())
   const [balanceBlockDeltaCounts, setBalanceBlockDeltaCounts] = useState<Map<string, number>>(new Map())
   const [errorMessage, setErrorMessage] = useState<string>('')
+  const [selectedStudentsForMassUpdate, setSelectedStudentsForMassUpdate] = useState<Set<string>>(new Set())
+  const [showMassUpdateDialog, setShowMassUpdateDialog] = useState<boolean>(false)
+  const [massUpdateTargetSubject, setMassUpdateTargetSubject] = useState<string>('')
+  const [massUpdateTargetBlock, setMassUpdateTargetBlock] = useState<string>('')
 
   const selectedStudent = useMemo(() => {
     if (!parsedData || !selectedStudentId) {
@@ -1509,15 +1513,227 @@ function App() {
                 <section className="group-members-panel">
                   <h3>Students In Selected Subject Group</h3>
                   <p>Click another row to switch subject/group/block.</p>
+                  <div style={{ marginBottom: '1rem', display: 'flex', gap: '0.5rem' }}>
+                    <button
+                      type="button"
+                      onClick={() => setShowMassUpdateDialog(true)}
+                      disabled={selectedStudentsForMassUpdate.size === 0}
+                      className="balance-button"
+                    >
+                      Massoppdater ({selectedStudentsForMassUpdate.size} valgt)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedStudentsForMassUpdate(new Set())}
+                      disabled={selectedStudentsForMassUpdate.size === 0}
+                      className="clear-results-button"
+                    >
+                      Tøm valg
+                    </button>
+                  </div>
                   <div className="group-member-list">
                     {selectedGroupMembers.map((student) => (
-                      <div key={student.id} className="group-member-item">
-                        <span>{student.fullName}</span>
-                        <small>{student.id}</small>
+                      <div key={student.id} className="group-member-item" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <input
+                          type="checkbox"
+                          checked={selectedStudentsForMassUpdate.has(student.id)}
+                          onChange={(e) => {
+                            const newSet = new Set(selectedStudentsForMassUpdate)
+                            if (e.target.checked) {
+                              newSet.add(student.id)
+                            } else {
+                              newSet.delete(student.id)
+                            }
+                            setSelectedStudentsForMassUpdate(newSet)
+                          }}
+                        />
+                        <div style={{ flex: 1 }}>
+                          <span>{student.fullName}</span>
+                          <small>{student.id}</small>
+                        </div>
                       </div>
                     ))}
                   </div>
                 </section>
+              )}
+
+              {showMassUpdateDialog && (
+                <div className="modal-overlay" onClick={() => setShowMassUpdateDialog(false)}>
+                  <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+                    <h3>Massoppdater elever</h3>
+                    <p>{selectedStudentsForMassUpdate.size} elever valgt</p>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '1rem' }}>
+                      <label>
+                        <strong>Nytt fag:</strong>
+                        <select
+                          value={massUpdateTargetSubject}
+                          onChange={(e) => setMassUpdateTargetSubject(e.target.value)}
+                          style={{ width: '100%', marginTop: '0.5rem', padding: '0.5rem' }}
+                        >
+                          <option value="">Velg fag...</option>
+                          {parsedData?.subjects
+                            .filter((s) => s.blocks && s.blocks.length > 0)
+                            .sort((a, b) => a.name.localeCompare(b.name))
+                            .map((subject) => (
+                              <option key={subject.code} value={subject.code}>
+                                {subject.code} - {subject.name}
+                              </option>
+                            ))}
+                        </select>
+                      </label>
+                      <label>
+                        <strong>Ny blokk:</strong>
+                        <select
+                          value={massUpdateTargetBlock}
+                          onChange={(e) => setMassUpdateTargetBlock(e.target.value)}
+                          style={{ width: '100%', marginTop: '0.5rem', padding: '0.5rem' }}
+                        >
+                          <option value="">Velg blokk...</option>
+                          <option value="Blokk 1">Blokk 1</option>
+                          <option value="Blokk 2">Blokk 2</option>
+                          <option value="Blokk 3">Blokk 3</option>
+                          <option value="Blokk 4">Blokk 4</option>
+                        </select>
+                      </label>
+                      <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!massUpdateTargetSubject || !massUpdateTargetBlock || !selectedGroupKey) {
+                              alert('Vennligst velg både fag og blokk')
+                              return
+                            }
+
+                            // Parse current group key
+                            const [oldSubjectCode, oldGroupCode, oldBlock] = selectedGroupKey.split('-')
+
+                            // Find the target subject details
+                            const targetSubject = parsedData?.subjects.find((s) => s.code === massUpdateTargetSubject)
+                            if (!targetSubject) {
+                              alert('Fag ikke funnet')
+                              return
+                            }
+
+                            // Find the smallest group for the target subject/block combination
+                            const targetGroups = parsedData?.groupBreakdowns.filter(
+                              (gb) => gb.subjectCode === massUpdateTargetSubject && gb.block === massUpdateTargetBlock
+                            ) || []
+
+                            if (targetGroups.length === 0) {
+                              alert(`Ingen grupper funnet for ${targetSubject.name} i ${massUpdateTargetBlock}`)
+                              return
+                            }
+
+                            targetGroups.sort((a, b) => a.studentCount - b.studentCount)
+                            const smallestGroup = targetGroups[0]
+
+                            // Store original counts
+                            const originalCounts = new Map<string, number>()
+                            parsedData!.groupBreakdowns.forEach((item) => {
+                              const key = `${item.subjectCode}|${item.groupCode}|${item.block}`
+                              originalCounts.set(key, item.studentCount)
+                            })
+
+                            const originalBlockCounts = new Map<string, number>()
+                            parsedData!.blockBreakdowns.forEach((item) => {
+                              originalBlockCounts.set(item.block, item.studentCount)
+                            })
+
+                            // Apply mass update by directly manipulating student assignments
+                            const updatedStudents = parsedData!.students.map((student) => {
+                              if (!selectedStudentsForMassUpdate.has(student.id)) {
+                                return student
+                              }
+
+                              // Remove old assignment and add new one
+                              const updatedAssignments = student.assignments
+                                .filter((a) => !(a.subjectCode === oldSubjectCode && a.groupCode === oldGroupCode && a.block === oldBlock))
+                                .concat([
+                                  {
+                                    subjectCode: massUpdateTargetSubject,
+                                    subjectName: targetSubject.name,
+                                    groupCode: smallestGroup.groupCode,
+                                    block: massUpdateTargetBlock,
+                                  },
+                                ])
+
+                              return {
+                                ...student,
+                                assignments: updatedAssignments,
+                              }
+                            })
+                            const { groupBreakdowns: newGroupBreakdowns, blockBreakdowns: newBlockBreakdowns } = recalculateBreakdowns(updatedStudents)
+                            const updatedData = {
+                              ...parsedData!,
+                              students: updatedStudents,
+                              groupBreakdowns: newGroupBreakdowns,
+                              blockBreakdowns: newBlockBreakdowns,
+                            }
+                            setParsedData(updatedData)
+
+                            // Calculate deltas
+                            const newCounts = new Map<string, number>()
+                            updatedData.groupBreakdowns.forEach((item) => {
+                              const key = `${item.subjectCode}|${item.groupCode}|${item.block}`
+                              newCounts.set(key, item.studentCount)
+                            })
+
+                            const allGroupKeys = new Set<string>([...Array.from(originalCounts.keys()), ...Array.from(newCounts.keys())])
+                            const deltas = new Map<string, number>()
+                            allGroupKeys.forEach((key) => {
+                              const delta = (newCounts.get(key) || 0) - (originalCounts.get(key) || 0)
+                              if (delta !== 0) {
+                                deltas.set(key, delta)
+                              }
+                            })
+
+                            const newBlockCounts = new Map<string, number>()
+                            updatedData.blockBreakdowns.forEach((item) => {
+                              newBlockCounts.set(item.block, item.studentCount)
+                            })
+
+                            const blockDeltas = new Map<string, number>()
+                            originalBlockCounts.forEach((originalCount, block) => {
+                              const newCount = newBlockCounts.get(block) || 0
+                              const delta = newCount - originalCount
+                              if (delta !== 0) {
+                                blockDeltas.set(block, delta)
+                              }
+                            })
+
+                            setBalanceDeltaCounts(deltas)
+                            setBalanceBlockDeltaCounts(blockDeltas)
+
+                            // Update message
+                            setBalanceMessage(`Masseoppdatering: ${selectedStudentsForMassUpdate.size} elever flyttet til ${targetSubject.name} (${smallestGroup.groupCode}) i ${massUpdateTargetBlock}`)
+
+                            // Clear selection and close dialog
+                            setSelectedStudentsForMassUpdate(new Set())
+                            setShowMassUpdateDialog(false)
+                            setMassUpdateTargetSubject('')
+                            setMassUpdateTargetBlock('')
+                            setSelectedGroupKey('')
+                          }}
+                          className="balance-button"
+                          disabled={!massUpdateTargetSubject || !massUpdateTargetBlock}
+                        >
+                          Oppdater
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowMassUpdateDialog(false)
+                            setMassUpdateTargetSubject('')
+                            setMassUpdateTargetBlock('')
+                          }}
+                          className="clear-results-button"
+                        >
+                          Avbryt
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               )}
 
               <h2>By Subject (All Groups)</h2>

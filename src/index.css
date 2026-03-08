@@ -1,13 +1,21 @@
 :root {
-  font-family: Bahnschrift, 'Trebuchet MS', Tahoma, sans-serif;
+  font-family: Aptos, 'Segoe UI', 'Noto Sans', sans-serif;
   line-height: 1.45;
   font-weight: 400;
-  color: #102725;
-  background: radial-gradient(circle at 20% 5%, #d9f0e2 0%, #f4f6e8 38%, #d6e6d6 100%);
+  color: #1d2a3d;
+  background: linear-gradient(180deg, #f1f5fb 0%, #edf2f8 100%);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  --panel: #ffffff;
+  --line-soft: #d7e1ef;
+  --ink-1: #1d2a3d;
+  --ink-2: #2f425d;
+  --ink-3: #5f7088;
+  --brand: #1f5eb8;
+  --shadow-card: 0 8px 22px rgba(26, 49, 80, 0.08);
 }
 
 * {
@@ -18,4 +26,5 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  color: var(--ink-1);
 }
