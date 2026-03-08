@@ -658,6 +658,24 @@ th {
   color: #5f7090;
 }
 
+.group-member-added {
+  background: #eefaf2;
+  border-color: #bfe7cc;
+}
+
+.group-member-removed {
+  background: #fff1f1;
+  border-color: #edc0c0;
+}
+
+.group-member-removed span {
+  color: #8e2d2d;
+}
+
+.group-member-removed small {
+  color: #9f4a4a;
+}
+
 .inline-group-row td {
   background: #f9fbff;
 }

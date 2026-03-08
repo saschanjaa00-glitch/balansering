@@ -1696,6 +1696,57 @@ function parseStudentCsv(value: string): string[] {
     .filter((item) => /^\d+$/u.test(item))
 }
 
+function computeTotalDeltaCounts(parsedData: ParsedData): {
+  groupDeltas: Map<string, number>
+  blockDeltas: Map<string, number>
+} {
+  const originalGroupCounts = new Map<string, number>()
+  const originalBlockCounts = new Map<string, number>()
+
+  Object.values(parsedData.initialAssignmentKeysByStudent).forEach((assignmentKeys) => {
+    assignmentKeys.forEach((key) => {
+      const { subjectCode, groupCode, block } = parseAssignmentKey(key)
+      const groupKey = `${subjectCode}|${groupCode}|${block}`
+      originalGroupCounts.set(groupKey, (originalGroupCounts.get(groupKey) || 0) + 1)
+
+      if (block) {
+        originalBlockCounts.set(block, (originalBlockCounts.get(block) || 0) + 1)
+      }
+    })
+  })
+
+  const currentGroupCounts = new Map<string, number>()
+  parsedData.groupBreakdowns.forEach((item) => {
+    const key = `${item.subjectCode}|${item.groupCode}|${item.block}`
+    currentGroupCounts.set(key, item.studentCount)
+  })
+
+  const currentBlockCounts = new Map<string, number>()
+  parsedData.blockBreakdowns.forEach((item) => {
+    currentBlockCounts.set(item.block, item.studentCount)
+  })
+
+  const groupDeltas = new Map<string, number>()
+  const allGroupKeys = new Set<string>([...Array.from(originalGroupCounts.keys()), ...Array.from(currentGroupCounts.keys())])
+  allGroupKeys.forEach((key) => {
+    const delta = (currentGroupCounts.get(key) || 0) - (originalGroupCounts.get(key) || 0)
+    if (delta !== 0) {
+      groupDeltas.set(key, delta)
+    }
+  })
+
+  const blockDeltas = new Map<string, number>()
+  const allBlockKeys = new Set<string>([...Array.from(originalBlockCounts.keys()), ...Array.from(currentBlockCounts.keys())])
+  allBlockKeys.forEach((key) => {
+    const delta = (currentBlockCounts.get(key) || 0) - (originalBlockCounts.get(key) || 0)
+    if (delta !== 0) {
+      blockDeltas.set(key, delta)
+    }
+  })
+
+  return { groupDeltas, blockDeltas }
+}
+
 function buildExportText(parsedData: ParsedData): string {
   const sourceDocument = parsedData.sourceDocument
   const tables: Record<string, SourceTable> = {}
@@ -1950,6 +2001,18 @@ function App() {
   }, [parsedData])
 
   useEffect(() => {
+    if (!parsedData) {
+      setBalanceDeltaCounts(new Map())
+      setBalanceBlockDeltaCounts(new Map())
+      return
+    }
+
+    const { groupDeltas, blockDeltas } = computeTotalDeltaCounts(parsedData)
+    setBalanceDeltaCounts(groupDeltas)
+    setBalanceBlockDeltaCounts(blockDeltas)
+  }, [parsedData])
+
+  useEffect(() => {
     saveToLocalStorage(STORAGE_KEYS.balanceHistory, balanceHistory)
   }, [balanceHistory])
 
@@ -2182,26 +2245,44 @@ function App() {
       })
   }, [parsedData, subjectQuery, blockFilter, onlyBlokkfag])
 
-  const groupMemberLookup = useMemo(() => {
+  const studentMetaById = useMemo(() => {
+    const map = new Map<string, { id: string; fullName: string; classGroup: string }>()
     if (!parsedData) {
-      return new Map<string, Array<{ id: string; fullName: string }>>()
+      return map
     }
 
-    const lookup = new Map<string, Map<string, { id: string; fullName: string }>>()
+    parsedData.students.forEach((student) => {
+      map.set(student.id, {
+        id: student.id,
+        fullName: student.fullName,
+        classGroup: student.classGroup || '',
+      })
+    })
+
+    return map
+  }, [parsedData])
+
+  const currentGroupMemberLookup = useMemo(() => {
+    if (!parsedData) {
+      return new Map<string, Array<{ id: string; fullName: string; classGroup: string }>>()
+    }
+
+    const lookup = new Map<string, Map<string, { id: string; fullName: string; classGroup: string }>>()
     parsedData.students.forEach((student) => {
       student.assignments.forEach((assignment) => {
         const key = `${assignment.subjectCode}-${assignment.groupCode}-${assignment.block}`
         if (!lookup.has(key)) {
-          lookup.set(key, new Map<string, { id: string; fullName: string }>())
+          lookup.set(key, new Map<string, { id: string; fullName: string; classGroup: string }>())
         }
         lookup.get(key)?.set(student.id, {
           id: student.id,
           fullName: student.fullName,
+          classGroup: student.classGroup || '',
         })
       })
     })
 
-    const sortedLookup = new Map<string, Array<{ id: string; fullName: string }>>()
+    const sortedLookup = new Map<string, Array<{ id: string; fullName: string; classGroup: string }>>()
     lookup.forEach((studentMap, key) => {
       const sortedStudents = Array.from(studentMap.values()).sort((a, b) => a.fullName.localeCompare(b.fullName))
       sortedLookup.set(key, sortedStudents)
@@ -2209,12 +2290,84 @@ function App() {
     return sortedLookup
   }, [parsedData])
 
+  const originalGroupMemberLookup = useMemo(() => {
+    if (!parsedData) {
+      return new Map<string, Array<{ id: string; fullName: string; classGroup: string }>>()
+    }
+
+    const lookup = new Map<string, Map<string, { id: string; fullName: string; classGroup: string }>>()
+
+    Object.entries(parsedData.initialAssignmentKeysByStudent).forEach(([studentId, assignmentKeys]) => {
+      const meta = studentMetaById.get(studentId) || {
+        id: studentId,
+        fullName: `Student ${studentId}`,
+        classGroup: '',
+      }
+
+      assignmentKeys.forEach((assignmentKey) => {
+        const { subjectCode, groupCode, block } = parseAssignmentKey(assignmentKey)
+        const key = `${subjectCode}-${groupCode}-${block}`
+        if (!lookup.has(key)) {
+          lookup.set(key, new Map<string, { id: string; fullName: string; classGroup: string }>())
+        }
+        lookup.get(key)?.set(studentId, meta)
+      })
+    })
+
+    const sortedLookup = new Map<string, Array<{ id: string; fullName: string; classGroup: string }>>()
+    lookup.forEach((studentMap, key) => {
+      const sortedStudents = Array.from(studentMap.values()).sort((a, b) => a.fullName.localeCompare(b.fullName))
+      sortedLookup.set(key, sortedStudents)
+    })
+
+    return sortedLookup
+  }, [parsedData, studentMetaById])
+
   const selectedGroupMembers = useMemo(() => {
     if (!selectedGroupKey) {
-      return []
+      return [] as Array<{ id: string; fullName: string; classGroup: string; status: 'unchanged' | 'added' | 'removed' }>
     }
-    return groupMemberLookup.get(selectedGroupKey) || []
-  }, [groupMemberLookup, selectedGroupKey])
+
+    const currentMembers = currentGroupMemberLookup.get(selectedGroupKey) || []
+    const originalMembers = originalGroupMemberLookup.get(selectedGroupKey) || []
+    const currentIds = new Set(currentMembers.map((student) => student.id))
+    const originalIds = new Set(originalMembers.map((student) => student.id))
+
+    const unchanged = currentMembers
+      .filter((student) => originalIds.has(student.id))
+      .map((student) => ({ ...student, status: 'unchanged' as const }))
+
+    const added = currentMembers
+      .filter((student) => !originalIds.has(student.id))
+      .map((student) => ({ ...student, status: 'added' as const }))
+
+    const removed = originalMembers
+      .filter((student) => !currentIds.has(student.id))
+      .map((student) => ({ ...student, status: 'removed' as const }))
+
+    return [...unchanged, ...added, ...removed]
+  }, [currentGroupMemberLookup, originalGroupMemberLookup, selectedGroupKey])
+
+  const selectedGroupActiveMemberCount = useMemo(
+    () => selectedGroupMembers.filter((student) => student.status !== 'removed').length,
+    [selectedGroupMembers],
+  )
+
+  useEffect(() => {
+    const activeIds = new Set(
+      selectedGroupMembers.filter((student) => student.status !== 'removed').map((student) => student.id),
+    )
+
+    setSelectedStudentsForMassUpdate((previous) => {
+      const next = new Set<string>()
+      previous.forEach((id) => {
+        if (activeIds.has(id)) {
+          next.add(id)
+        }
+      })
+      return next.size === previous.size ? previous : next
+    })
+  }, [selectedGroupMembers])
 
   const summarizedBalanceResults = useMemo(() => {
     if (!balanceResults) {
@@ -2683,28 +2836,14 @@ function App() {
                   <button
                     type="button"
                     onClick={() => {
-                    // Calculate original group occupancy
-                    const originalCounts = new Map<string, number>()
-                    parsedData.groupBreakdowns.forEach((item) => {
-                      const key = `${item.subjectCode}|${item.groupCode}|${item.block}`
-                      originalCounts.set(key, item.studentCount)
-                    })
-
-                    // Calculate original block occupancy
-                    const originalBlockCounts = new Map<string, number>()
-                    parsedData.blockBreakdowns.forEach((item) => {
-                      originalBlockCounts.set(item.block, item.studentCount)
-                    })
-
                     const result = balanceGroups(parsedData.students, (groups) => setDebugGroups(groups))
                     setBalanceResults(result.changes)
                     
                     // Apply changes to the parsed data
-                    let updatedData = parsedData
                     if (result.changes.length > 0) {
                       const updatedStudents = applyBalanceChanges(parsedData.students, result.changes)
                       const { groupBreakdowns: newGroupBreakdowns, blockBreakdowns: newBlockBreakdowns } = recalculateBreakdowns(updatedStudents)
-                      updatedData = {
+                      const updatedData = {
                         ...parsedData,
                         students: updatedStudents,
                         groupBreakdowns: newGroupBreakdowns,
@@ -2712,40 +2851,6 @@ function App() {
                       }
                       setParsedData(updatedData)
                     }
-
-                    // Calculate new group occupancy and compute deltas
-                    const newCounts = new Map<string, number>()
-                    updatedData.groupBreakdowns.forEach((item) => {
-                      const key = `${item.subjectCode}|${item.groupCode}|${item.block}`
-                      newCounts.set(key, item.studentCount)
-                    })
-
-                    const deltas = new Map<string, number>()
-                    originalCounts.forEach((originalCount, key) => {
-                      const newCount = newCounts.get(key) || 0
-                      const delta = newCount - originalCount
-                      if (delta !== 0) {
-                        deltas.set(key, delta)
-                      }
-                    })
-
-                    // Calculate new block occupancy and compute block deltas
-                    const newBlockCounts = new Map<string, number>()
-                    updatedData.blockBreakdowns.forEach((item) => {
-                      newBlockCounts.set(item.block, item.studentCount)
-                    })
-
-                    const blockDeltas = new Map<string, number>()
-                    originalBlockCounts.forEach((originalCount, block) => {
-                      const newCount = newBlockCounts.get(block) || 0
-                      const delta = newCount - originalCount
-                      if (delta !== 0) {
-                        blockDeltas.set(block, delta)
-                      }
-                    })
-
-                    setBalanceDeltaCounts(deltas)
-                    setBalanceBlockDeltaCounts(blockDeltas)
                     
                     let nextBalanceMessage = ''
                     if (result.overcrowdedCount === 0) {
@@ -2844,8 +2949,6 @@ function App() {
                       setBalanceHistory([])
                       setBalanceMessage('')
                       setDebugGroups([])
-                      setBalanceDeltaCounts(new Map())
-                      setBalanceBlockDeltaCounts(new Map())
                     }}
                     className="clear-results-button"
                   >
@@ -2933,7 +3036,9 @@ function App() {
                               <div style={{ marginBottom: '1rem' }}>
                                 <strong>Elever i valgt faggruppe</strong>
                                 <p style={{ margin: '0.25rem 0 0.75rem 0', fontSize: '0.9rem', color: '#666' }}>
-                                  Klikk en annen rad for å bytte, eller klikk igjen for å lukke.
+                                  {selectedGroupActiveMemberCount} aktive i gruppen.
+                                  {selectedGroupMembers.some((student) => student.status === 'added') && ' Nye elever er markert i grønt.'}
+                                  {selectedGroupMembers.some((student) => student.status === 'removed') && ' Fjernede elever vises nederst i rødt og telles ikke med.'}
                                 </p>
                               </div>
                               <div style={{ marginBottom: '1rem', display: 'flex', gap: '0.5rem' }}>
@@ -2962,25 +3067,44 @@ function App() {
                               </div>
                               <div className="group-member-list">
                                 {selectedGroupMembers.map((student) => (
-                                  <div key={student.id} className="group-member-item" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                    <input
-                                      type="checkbox"
-                                      checked={selectedStudentsForMassUpdate.has(student.id)}
-                                      onChange={(e) => {
-                                        e.stopPropagation()
-                                        const newSet = new Set(selectedStudentsForMassUpdate)
-                                        if (e.target.checked) {
-                                          newSet.add(student.id)
-                                        } else {
-                                          newSet.delete(student.id)
-                                        }
-                                        setSelectedStudentsForMassUpdate(newSet)
-                                      }}
-                                      onClick={(e) => e.stopPropagation()}
-                                    />
+                                  <div
+                                    key={`${student.status}-${student.id}`}
+                                    className={`group-member-item ${
+                                      student.status === 'added'
+                                        ? 'group-member-added'
+                                        : student.status === 'removed'
+                                          ? 'group-member-removed'
+                                          : ''
+                                    }`}
+                                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+                                  >
+                                    {student.status !== 'removed' ? (
+                                      <input
+                                        type="checkbox"
+                                        checked={selectedStudentsForMassUpdate.has(student.id)}
+                                        onChange={(e) => {
+                                          e.stopPropagation()
+                                          const newSet = new Set(selectedStudentsForMassUpdate)
+                                          if (e.target.checked) {
+                                            newSet.add(student.id)
+                                          } else {
+                                            newSet.delete(student.id)
+                                          }
+                                          setSelectedStudentsForMassUpdate(newSet)
+                                        }}
+                                        onClick={(e) => e.stopPropagation()}
+                                      />
+                                    ) : (
+                                      <span style={{ width: '1rem' }} />
+                                    )}
                                     <div style={{ flex: 1 }}>
                                       <span>{student.fullName}</span>
-                                      <small>{student.id}</small>
+                                      <small>
+                                        {student.classGroup ? `${student.classGroup} | ` : ''}
+                                        {student.id}
+                                        {student.status === 'added' ? ' | Lagt til' : ''}
+                                        {student.status === 'removed' ? ' | Fjernet' : ''}
+                                      </small>
                                     </div>
                                   </div>
                                 ))}
@@ -3064,18 +3188,6 @@ function App() {
                             targetGroups.sort((a, b) => a.studentCount - b.studentCount)
                             const smallestGroup = targetGroups[0]
 
-                            // Store original counts
-                            const originalCounts = new Map<string, number>()
-                            parsedData!.groupBreakdowns.forEach((item) => {
-                              const key = `${item.subjectCode}|${item.groupCode}|${item.block}`
-                              originalCounts.set(key, item.studentCount)
-                            })
-
-                            const originalBlockCounts = new Map<string, number>()
-                            parsedData!.blockBreakdowns.forEach((item) => {
-                              originalBlockCounts.set(item.block, item.studentCount)
-                            })
-
                             // Apply mass update by directly manipulating student assignments
                             const updatedStudents = parsedData!.students.map((student) => {
                               if (!selectedStudentsForMassUpdate.has(student.id)) {
@@ -3107,39 +3219,6 @@ function App() {
                               blockBreakdowns: newBlockBreakdowns,
                             }
                             setParsedData(updatedData)
-
-                            // Calculate deltas
-                            const newCounts = new Map<string, number>()
-                            updatedData.groupBreakdowns.forEach((item) => {
-                              const key = `${item.subjectCode}|${item.groupCode}|${item.block}`
-                              newCounts.set(key, item.studentCount)
-                            })
-
-                            const allGroupKeys = new Set<string>([...Array.from(originalCounts.keys()), ...Array.from(newCounts.keys())])
-                            const deltas = new Map<string, number>()
-                            allGroupKeys.forEach((key) => {
-                              const delta = (newCounts.get(key) || 0) - (originalCounts.get(key) || 0)
-                              if (delta !== 0) {
-                                deltas.set(key, delta)
-                              }
-                            })
-
-                            const newBlockCounts = new Map<string, number>()
-                            updatedData.blockBreakdowns.forEach((item) => {
-                              newBlockCounts.set(item.block, item.studentCount)
-                            })
-
-                            const blockDeltas = new Map<string, number>()
-                            originalBlockCounts.forEach((originalCount, block) => {
-                              const newCount = newBlockCounts.get(block) || 0
-                              const delta = newCount - originalCount
-                              if (delta !== 0) {
-                                blockDeltas.set(block, delta)
-                              }
-                            })
-
-                            setBalanceDeltaCounts(deltas)
-                            setBalanceBlockDeltaCounts(blockDeltas)
 
                             // Update message
                             setBalanceMessage(`Masseoppdatering: ${selectedStudentsForMassUpdate.size} elever flyttet til ${targetSubject.name} (${smallestGroup.groupCode}) i ${massUpdateTargetBlock}`)
@@ -3348,28 +3427,14 @@ function App() {
                           onClick={() => {
                             if (!parsedData) return
 
-                            // Calculate original group occupancy
-                            const originalCounts = new Map<string, number>()
-                            parsedData.groupBreakdowns.forEach((item) => {
-                              const key = `${item.subjectCode}|${item.groupCode}|${item.block}`
-                              originalCounts.set(key, item.studentCount)
-                            })
-
-                            // Calculate original block occupancy
-                            const originalBlockCounts = new Map<string, number>()
-                            parsedData.blockBreakdowns.forEach((item) => {
-                              originalBlockCounts.set(item.block, item.studentCount)
-                            })
-
                             const result = progressiveBalanceGroups(parsedData.students, progressiveBalanceMaxOffset, (groups) => setDebugGroups(groups))
                             setBalanceResults(result.allChanges)
                             
                             // Apply changes to the parsed data
-                            let updatedData = parsedData
                             if (result.allChanges.length > 0) {
                               const updatedStudents = applyBalanceChanges(parsedData.students, result.allChanges)
                               const { groupBreakdowns: newGroupBreakdowns, blockBreakdowns: newBlockBreakdowns } = recalculateBreakdowns(updatedStudents)
-                              updatedData = {
+                              const updatedData = {
                                 ...parsedData,
                                 students: updatedStudents,
                                 groupBreakdowns: newGroupBreakdowns,
@@ -3377,40 +3442,6 @@ function App() {
                               }
                               setParsedData(updatedData)
                             }
-
-                            // Calculate new group occupancy and compute deltas
-                            const newCounts = new Map<string, number>()
-                            updatedData.groupBreakdowns.forEach((item) => {
-                              const key = `${item.subjectCode}|${item.groupCode}|${item.block}`
-                              newCounts.set(key, item.studentCount)
-                            })
-
-                            const deltas = new Map<string, number>()
-                            originalCounts.forEach((originalCount, key) => {
-                              const newCount = newCounts.get(key) || 0
-                              const delta = newCount - originalCount
-                              if (delta !== 0) {
-                                deltas.set(key, delta)
-                              }
-                            })
-
-                            // Calculate new block occupancy and compute block deltas
-                            const newBlockCounts = new Map<string, number>()
-                            updatedData.blockBreakdowns.forEach((item) => {
-                              newBlockCounts.set(item.block, item.studentCount)
-                            })
-
-                            const blockDeltas = new Map<string, number>()
-                            originalBlockCounts.forEach((originalCount, block) => {
-                              const newCount = newBlockCounts.get(block) || 0
-                              const delta = newCount - originalCount
-                              if (delta !== 0) {
-                                blockDeltas.set(block, delta)
-                              }
-                            })
-
-                            setBalanceDeltaCounts(deltas)
-                            setBalanceBlockDeltaCounts(blockDeltas)
                             
                             setBalanceMessage(result.summary)
                             appendBalanceHistoryRun(result.allChanges, result.summary)
