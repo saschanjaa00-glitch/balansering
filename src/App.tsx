@@ -545,341 +545,140 @@ function advancedBalanceAlgorithm(
   students: StudentRecord[]
 ): { changes: AdvancedBalanceChange[]; metrics: { moved: number; swaps: number; totalChanges: number } } {
   const changes: AdvancedBalanceChange[] = []
-  const TIMESLOT_CAPACITY = 30
-  const TIMESLOTS = ['A', 'B', 'C']
+  const GROUP_CAPACITY = 30
 
-  // Build current assignments: {studentId -> {subjectCode -> timeslot}}
+  // Build current assignments: {studentId -> {subjectCode -> groupCode}}
   const studentAssignments = new Map<string, Map<string, string>>()
-  const timeslotEnrollment = new Map<string, Map<string, number>>() // {timeslot -> {subjectCode -> count}}
+  const groupEnrollment = new Map<string, number>() // {groupKey -> count} where groupKey = "subjectCode|groupCode|block"
+  const subjectGroups = new Map<string, Set<string>>() // {subjectCode -> Set of groupCodes}
 
+  // Initialize structures
   students.forEach((student) => {
     const assignments = new Map<string, string>()
     student.assignments.forEach((assignment) => {
-      const timeslot = assignment.block.match(/\d+/)?.[0] // Extract block number as timeslot proxy
-      if (timeslot) {
-        assignments.set(assignment.subjectCode, timeslot)
+      assignments.set(assignment.subjectCode, assignment.groupCode)
+      
+      // Track group enrollment
+      const groupKey = `${assignment.subjectCode}|${assignment.groupCode}|${assignment.block}`
+      groupEnrollment.set(groupKey, (groupEnrollment.get(groupKey) || 0) + 1)
+      
+      // Track available groups per subject
+      if (!subjectGroups.has(assignment.subjectCode)) {
+        subjectGroups.set(assignment.subjectCode, new Set())
       }
+      subjectGroups.get(assignment.subjectCode)?.add(assignment.groupCode)
     })
     studentAssignments.set(student.id, assignments)
   })
 
-  // Calculate enrollment per (timeslot, subject)
-  TIMESLOTS.forEach((slot) => {
-    timeslotEnrollment.set(slot, new Map())
+  // Step 1: Detect overfull groups
+  const overfullGroups: Array<{ key: string; subject: string; group: string; block: string; count: number }> = []
+  groupEnrollment.forEach((count, key) => {
+    if (count > GROUP_CAPACITY) {
+      const [subject, group, block] = key.split('|')
+      overfullGroups.push({ key, subject, group, block, count })
+    }
   })
 
-  students.forEach((student) => {
-    const assignments = studentAssignments.get(student.id) || new Map()
-    assignments.forEach((timeslot, subjectCode) => {
-      const slotMap = timeslotEnrollment.get(timeslot) || new Map()
-      slotMap.set(subjectCode, (slotMap.get(subjectCode) || 0) + 1)
-      timeslotEnrollment.set(timeslot, slotMap)
-    })
-  })
-
-  // Step 1: Detect overfull classes
-  const overfull: Array<{ timeslot: string; subjectCode: string; count: number }> = []
-  timeslotEnrollment.forEach((slotMap, timeslot) => {
-    slotMap.forEach((count, subjectCode) => {
-      if (count > TIMESLOT_CAPACITY) {
-        overfull.push({ timeslot, subjectCode, count })
-      }
-    })
-  })
-
-  if (overfull.length === 0) {
+  if (overfullGroups.length === 0) {
     return {
       changes,
       metrics: { moved: 0, swaps: 0, totalChanges: 0 },
     }
   }
 
-  // Step 2: Internal swaps (move students within same subject to different timeslots)
-  const processedStudents = new Set<string>()
+  // Step 2: Try to move students from overfull groups
+  const tryMoveStudents = (overfullSubject: string, overfullGroup: string, overfullBlock: string): boolean => {
+    const overfullKey = `${overfullSubject}|${overfullGroup}|${overfullBlock}`
+    let moved = false
 
-  const tryInternalSwap = (overfullSubject: string, overfullSlot: string): boolean => {
-    let anyMoves = false
-
-    // Find students in overfull subject+slot who could move elsewhere
+    // Find students in the overfull group
     const studentsInOverfull: string[] = []
     students.forEach((student) => {
-      if (processedStudents.has(student.id)) return
       const assignments = studentAssignments.get(student.id)
-      if (assignments?.get(overfullSubject) === overfullSlot) {
-        studentsInOverfull.push(student.id)
+      if (assignments?.get(overfullSubject) === overfullGroup) {
+        // Also check they're in the right block
+        const hasInBlock = student.assignments.some(
+          (a) => a.subjectCode === overfullSubject && a.groupCode === overfullGroup && a.block === overfullBlock
+        )
+        if (hasInBlock) {
+          studentsInOverfull.push(student.id)
+        }
       }
     })
 
+    // Try to move students to other available groups for this subject
     for (const studentId of studentsInOverfull) {
-      if (anyMoves) break
+      if (moved) break
 
       const student = students.find((s) => s.id === studentId)
       if (!student) continue
 
-      const assignments = studentAssignments.get(studentId) || new Map()
-      const usedSlots = new Set(assignments.values())
+      const studentAssignment = studentAssignments.get(studentId)
+      if (!studentAssignment) continue
 
-      // Try to move to another timeslot for this subject
-      for (const targetSlot of TIMESLOTS) {
-        if (targetSlot === overfullSlot || usedSlots.has(targetSlot)) continue
+      // Find other groups for this subject
+      const availableGroups = subjectGroups.get(overfullSubject) || new Set()
+      
+      for (const targetGroup of availableGroups) {
+        if (targetGroup === overfullGroup) continue
 
-        const targetCount = (timeslotEnrollment.get(targetSlot)?.get(overfullSubject) || 0) + 1
-        if (targetCount <= TIMESLOT_CAPACITY) {
-          // Make the move
-          timeslotEnrollment.get(overfullSlot)?.set(overfullSubject, (timeslotEnrollment.get(overfullSlot)?.get(overfullSubject) || 0) - 1)
-          timeslotEnrollment.get(targetSlot)?.set(overfullSubject, targetCount)
+        // Check if this group has capacity
+        // Try to find a target group in a different block
+        const targetGroupMatches = student.assignments.filter((a) => a.subjectCode === overfullSubject && a.groupCode === targetGroup)
+        
+        if (targetGroupMatches.length > 0) {
+          const targetBlock = targetGroupMatches[0].block
+          const targetKey = `${overfullSubject}|${targetGroup}|${targetBlock}`
+          const targetCount = groupEnrollment.get(targetKey) || 0
 
-          assignments.set(overfullSubject, targetSlot)
-          studentAssignments.set(studentId, assignments)
+          if (targetCount < GROUP_CAPACITY) {
+            // Move the student
+            groupEnrollment.set(overfullKey, (groupEnrollment.get(overfullKey) || 0) - 1)
+            groupEnrollment.set(targetKey, targetCount + 1)
 
-          changes.push({
-            studentId,
-            studentName: student.fullName,
-            subjectCode: overfullSubject,
-            subjectName: student.assignments.find((a) => a.subjectCode === overfullSubject)?.subjectName || overfullSubject,
-            fromTimeslot: overfullSlot,
-            toTimeslot: targetSlot,
-            reason: 'Intern omfordeling innen fag',
-          })
+            studentAssignment.set(overfullSubject, targetGroup)
+            studentAssignments.set(studentId, studentAssignment)
 
-          anyMoves = true
-          break
-        }
-      }
-    }
+            changes.push({
+              studentId,
+              studentName: student.fullName,
+              subjectCode: overfullSubject,
+              subjectName: student.assignments.find((a) => a.subjectCode === overfullSubject)?.subjectName || overfullSubject,
+              fromTimeslot: overfullGroup,
+              toTimeslot: targetGroup,
+              reason: `Omfordeling fra ${overfullGroup} til ${targetGroup}`,
+            })
 
-    return anyMoves
-  }
-
-  // Step 2b: N-way swaps within single student's assignments
-  const tryStudentNWaySwaps = (): boolean => {
-    let anyImprovement = false
-
-    // Find students who have subjects in overfull slots
-    for (const studentId of studentAssignments.keys()) {
-      if (processedStudents.has(studentId)) continue
-
-      const student = students.find((s) => s.id === studentId)
-      if (!student) continue
-
-      const assignments = studentAssignments.get(studentId) || new Map()
-      const subjectSlots: Array<{ subject: string; slot: string }> = []
-
-      // Collect this student's subjects and their current slots
-      for (const [subject, slot] of assignments) {
-        if (slot) {
-          subjectSlots.push({ subject, slot })
-        }
-      }
-
-      if (subjectSlots.length < 2) continue
-
-      // Check if any of this student's subjects are in overfull slots
-      const hasOverfull = subjectSlots.some(({ subject, slot }) => {
-        const count = timeslotEnrollment.get(slot)?.get(subject) || 0
-        return count > TIMESLOT_CAPACITY
-      })
-
-      if (!hasOverfull) continue
-
-      // Try n-way swaps (up to 3 subjects)
-      const subjectIndices = Array.from({ length: subjectSlots.length }, (_, i) => i)
-
-      // Try swaps of different lengths (1-swap, 2-swap, 3-swap)
-      for (let swapLength = 1; swapLength <= Math.min(3, subjectSlots.length); swapLength++) {
-        // Generate all cycles of length swapLength
-        const generateCycles = (start: number, length: number, visited: Set<number> = new Set()): number[][] => {
-          if (length === 0) return [[]]
-          if (length === 1) return [[start]]
-
-          const result: number[][] = []
-          for (let i = 0; i < subjectIndices.length; i++) {
-            if (i === start || visited.has(i)) continue
-            const newVisited = new Set(visited)
-            newVisited.add(i)
-            const subCycles = generateCycles(i, length - 1, newVisited)
-            for (const cycle of subCycles) {
-              result.push([start, ...cycle])
-            }
-          }
-          return result
-        }
-
-        // Try all cycles starting from each position
-        for (let startIdx = 0; startIdx < subjectSlots.length; startIdx++) {
-          const cycles = generateCycles(startIdx, swapLength)
-
-          for (const cycle of cycles) {
-            let isValid = true
-            const swapPlan: Array<{ subject: string; fromSlot: string; toSlot: string }> = []
-
-            // Build and validate the swap plan
-            for (let i = 0; i < cycle.length; i++) {
-              const fromIdx = cycle[i]
-              const toIdx = cycle[(i + 1) % cycle.length]
-
-              const fromItem = subjectSlots[fromIdx]
-              const toItem = subjectSlots[toIdx]
-
-              if (!fromItem || !toItem) {
-                isValid = false
-                break
-              }
-
-              const subject = fromItem.subject
-              const fromSlot = fromItem.slot
-              const toSlot = toItem.slot
-
-              // Can't move to same slot
-              if (fromSlot === toSlot) {
-                isValid = false
-                break
-              }
-
-              // Check if target slot has capacity for this subject
-              const currentCount = timeslotEnrollment.get(toSlot)?.get(subject) || 0
-              const afterSwapCount = currentCount + 1
-
-              if (afterSwapCount > TIMESLOT_CAPACITY) {
-                isValid = false
-                break
-              }
-
-              swapPlan.push({ subject, fromSlot, toSlot })
-            }
-
-            // If this cycle is valid AND it helps (moves something from overfull), execute it
-            if (isValid && swapPlan.length === cycle.length) {
-              const hasOverfullRelief = swapPlan.some(({ subject, fromSlot }) => {
-                const count = timeslotEnrollment.get(fromSlot)?.get(subject) || 0
-                return count > TIMESLOT_CAPACITY
-              })
-
-              if (hasOverfullRelief) {
-                // Execute the swap plan
-                for (const { subject, fromSlot, toSlot } of swapPlan) {
-                  // Update enrollment
-                  timeslotEnrollment.get(fromSlot)?.set(subject, (timeslotEnrollment.get(fromSlot)?.get(subject) || 0) - 1)
-                  timeslotEnrollment.get(toSlot)?.set(subject, (timeslotEnrollment.get(toSlot)?.get(subject) || 0) + 1)
-
-                  // Update student assignment
-                  assignments.set(subject, toSlot)
-
-                  // Record change
-                  changes.push({
-                    studentId,
-                    studentName: student.fullName,
-                    subjectCode: subject,
-                    subjectName: student.assignments.find((a) => a.subjectCode === subject)?.subjectName || subject,
-                    fromTimeslot: fromSlot,
-                    toTimeslot: toSlot,
-                    reason: `N-way omfordeling (${swapLength}-swap)`,
-                  })
-                }
-
-                anyImprovement = true
-                return anyImprovement
-              }
-            }
+            moved = true
+            break
           }
         }
       }
     }
 
-    return anyImprovement
+    return moved
   }
 
-  // Step 3 & 4: Student swaps and chain swaps using local search
-  const tryStudentSwaps = (): boolean => {
-    let improved = false
-
-    for (const [studentAId, assignmentsA] of studentAssignments) {
-      if (processedStudents.has(studentAId)) continue
-
-      const studentA = students.find((s) => s.id === studentAId)
-      if (!studentA) continue
-
-      for (const [studentBId, assignmentsB] of studentAssignments) {
-        if (studentBId <= studentAId || processedStudents.has(studentBId)) continue
-
-        const studentB = students.find((s) => s.id === studentBId)
-        if (!studentB) continue
-
-        // Try simple 2-swap: see if swapping one subject between A and B helps
-        for (const subjectA of assignmentsA.keys()) {
-          for (const subjectB of assignmentsB.keys()) {
-            const slotA = assignmentsA.get(subjectA)
-            const slotB = assignmentsB.get(subjectB)
-
-            if (!slotA || !slotB) continue
-
-            // Check if swap would reduce overfull
-            const countAA = timeslotEnrollment.get(slotA)?.get(subjectA) || 0
-            const countBB = timeslotEnrollment.get(slotB)?.get(subjectB) || 0
-            const countAB = (timeslotEnrollment.get(slotB)?.get(subjectA) || 0) + 1
-            const countBA = (timeslotEnrollment.get(slotA)?.get(subjectB) || 0) + 1
-
-            if (countAB <= TIMESLOT_CAPACITY && countBA <= TIMESLOT_CAPACITY && (countAA > TIMESLOT_CAPACITY || countBB > TIMESLOT_CAPACITY)) {
-              // Perform swap
-              assignmentsA.set(subjectA, slotB)
-              assignmentsB.set(subjectB, slotA)
-
-              timeslotEnrollment.get(slotA)?.set(subjectA, countAA - 1)
-              timeslotEnrollment.get(slotA)?.set(subjectB, countBA)
-              timeslotEnrollment.get(slotB)?.set(subjectA, countAB)
-              timeslotEnrollment.get(slotB)?.set(subjectB, countBB - 1)
-
-              changes.push({
-                studentId: studentAId,
-                studentName: studentA.fullName,
-                subjectCode: subjectA,
-                subjectName: studentA.assignments.find((a) => a.subjectCode === subjectA)?.subjectName || subjectA,
-                fromTimeslot: slotA,
-                toTimeslot: slotB,
-                reason: 'Elevbytte',
-              })
-
-              changes.push({
-                studentId: studentBId,
-                studentName: studentB.fullName,
-                subjectCode: subjectB,
-                subjectName: studentB.assignments.find((a) => a.subjectCode === subjectB)?.subjectName || subjectB,
-                fromTimeslot: slotB,
-                toTimeslot: slotA,
-                reason: 'Elevbytte',
-              })
-
-              improved = true
-              return improved
-            }
-          }
-        }
-      }
-    }
-
-    return improved
-  }
-
-  // Iteratively apply improvements
-  let iterationLimit = 10
+  // Iteratively try to resolve overfull groups
+  let iterationLimit = 5
   while (iterationLimit-- > 0) {
     let madeProgress = false
 
-    // Try internal swaps for each overfull
-    for (const { timeslot, subjectCode } of overfull) {
-      if (tryInternalSwap(subjectCode, timeslot)) {
+    const currentOverfull = Array.from(groupEnrollment.entries())
+      .filter(([_, count]) => count > GROUP_CAPACITY)
+      .map(([key]) => {
+        const [subject, group, block] = key.split('|')
+        return { subject, group, block }
+      })
+
+    if (currentOverfull.length === 0) break
+
+    for (const { subject, group, block } of currentOverfull) {
+      if (tryMoveStudents(subject, group, block)) {
         madeProgress = true
+        break
       }
-    }
-
-    // Try n-way swaps within single student's assignments
-    if (tryStudentNWaySwaps()) {
-      madeProgress = true
-    }
-
-    // Try student swaps
-    if (tryStudentSwaps()) {
-      madeProgress = true
     }
 
     if (!madeProgress) break
@@ -890,7 +689,7 @@ function advancedBalanceAlgorithm(
     changes,
     metrics: {
       moved: movedStudents.size,
-      swaps: Math.floor(changes.length / 2),
+      swaps: 0,
       totalChanges: changes.length,
     },
   }
@@ -3401,10 +3200,10 @@ function App() {
                               studentName: c.studentName,
                               subjectCode: c.subjectCode,
                               subjectName: c.subjectName,
-                              fromGroupCode: c.fromTimeslot,
-                              fromBlock: `Slot ${c.fromTimeslot}`,
-                              toGroupCode: c.toTimeslot,
-                              toBlock: `Slot ${c.toTimeslot}`,
+                              fromGroupCode: c.fromTimeslot, // Contains actual group code
+                              fromBlock: 'Gruppe', // Label for display
+                              toGroupCode: c.toTimeslot, // Contains actual group code
+                              toBlock: 'Gruppe', // Label for display
                             }))
                             
                             setBalanceResults(displayChanges)
