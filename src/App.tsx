@@ -1042,6 +1042,10 @@ function App() {
   const [showAddSubjectDialog, setShowAddSubjectDialog] = useState<boolean>(false)
   const [addSubjectTargetCode, setAddSubjectTargetCode] = useState<string>('')
   const [addSubjectTargetBlock, setAddSubjectTargetBlock] = useState<string>('')
+  const [showStudentAddSubjectDialog, setShowStudentAddSubjectDialog] = useState<boolean>(false)
+  const [studentAddSubjectCode, setStudentAddSubjectCode] = useState<string>('')
+  const [studentAddSubjectBlock, setStudentAddSubjectBlock] = useState<string>('')
+  const [pendingRemovalAssignment, setPendingRemovalAssignment] = useState<string>('')
 
   const clearStoredData = (): void => {
     removeFromLocalStorage(STORAGE_KEYS.parsedData)
@@ -1072,6 +1076,10 @@ function App() {
     setShowAddSubjectDialog(false)
     setAddSubjectTargetCode('')
     setAddSubjectTargetBlock('')
+    setShowStudentAddSubjectDialog(false)
+    setStudentAddSubjectCode('')
+    setStudentAddSubjectBlock('')
+    setPendingRemovalAssignment('')
   }
 
   useEffect(() => {
@@ -1519,16 +1527,30 @@ function App() {
                 </div>
               </aside>
 
-              <article className="detail-panel">
+              <article className="detail-panel" onClick={() => setPendingRemovalAssignment('')}>
                 {selectedStudent ? (
                   <>
-                    <h2>
-                      {selectedStudent.fullName} {selectedStudent.classGroup && `(${selectedStudent.classGroup})`}
-                    </h2>
-                    <p>
-                      Elevnummer: <strong>{selectedStudent.id}</strong>
-                      {selectedStudent.email ? <> | {selectedStudent.email}</> : null}
-                    </p>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div>
+                        <h2>
+                          {selectedStudent.fullName} {selectedStudent.classGroup && `(${selectedStudent.classGroup})`}
+                        </h2>
+                        <p>
+                          Elevnummer: <strong>{selectedStudent.id}</strong>
+                          {selectedStudent.email ? <> | {selectedStudent.email}</> : null}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setShowStudentAddSubjectDialog(true)
+                        }}
+                        className="balance-button"
+                      >
+                        Legg til fag
+                      </button>
+                    </div>
 
                     <table>
                       <thead>
@@ -1537,20 +1559,90 @@ function App() {
                           <th>Tittel</th>
                           <th>Gruppe</th>
                           <th>Blokk</th>
+                          <th style={{ width: '80px' }}>Handling</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {filteredAssignments.map((assignment) => (
-                          <tr
-                            key={`${assignment.subjectCode}-${assignment.groupCode}-${assignment.block}`}
-                            className={assignment.block === 'MATTE' ? 'matte-assignment-row' : ''}
-                          >
-                            <td>{assignment.subjectCode}</td>
-                            <td>{assignment.subjectName}</td>
-                            <td>{assignment.groupCode}</td>
-                            <td>{assignment.block || '-'}</td>
-                          </tr>
-                        ))}
+                        {filteredAssignments.map((assignment) => {
+                          const assignmentKey = `${assignment.subjectCode}|${assignment.groupCode}|${assignment.block}`
+                          const isPendingRemoval = pendingRemovalAssignment === assignmentKey
+
+                          return (
+                            <tr
+                              key={`${assignment.subjectCode}-${assignment.groupCode}-${assignment.block}`}
+                              className={assignment.block === 'MATTE' ? 'matte-assignment-row' : ''}
+                            >
+                              <td>{assignment.subjectCode}</td>
+                              <td>{assignment.subjectName}</td>
+                              <td>{assignment.groupCode}</td>
+                              <td>{assignment.block || '-'}</td>
+                              <td>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+
+                                    if (!isPendingRemoval) {
+                                      // First click: Enter confirmation mode
+                                      setPendingRemovalAssignment(assignmentKey)
+                                      return
+                                    }
+
+                                    // Second click: Actually remove
+                                    const updatedStudents = parsedData.students.map((student) => {
+                                      if (student.id !== selectedStudent.id) {
+                                        return student
+                                      }
+
+                                      return {
+                                        ...student,
+                                        assignments: student.assignments.filter(
+                                          (a) => !(a.subjectCode === assignment.subjectCode && a.groupCode === assignment.groupCode && a.block === assignment.block)
+                                        ),
+                                      }
+                                    })
+
+                                    // Recalculate breakdowns
+                                    const { groupBreakdowns, blockBreakdowns } = recalculateBreakdowns(updatedStudents)
+
+                                    // Update subjects with new student count
+                                    const updatedSubjects = parsedData.subjects.map((subject) => {
+                                      if (subject.code !== assignment.subjectCode) {
+                                        return subject
+                                      }
+                                      return {
+                                        ...subject,
+                                        studentCount: Math.max(0, subject.studentCount - 1),
+                                      }
+                                    })
+
+                                    setParsedData({
+                                      ...parsedData,
+                                      students: updatedStudents,
+                                      subjects: updatedSubjects,
+                                      groupBreakdowns,
+                                      blockBreakdowns,
+                                    })
+
+                                    setPendingRemovalAssignment('')
+                                    setBalanceMessage(`${assignment.subjectName} fjernet for ${selectedStudent.fullName}`)
+                                  }}
+                                  style={{
+                                    padding: '0.25rem 0.5rem',
+                                    fontSize: '0.875rem',
+                                    backgroundColor: isPendingRemoval ? '#ffc107' : '#dc3545',
+                                    color: '#ffffff',
+                                    border: isPendingRemoval ? '1px solid #ffc107' : '1px solid #dc3545',
+                                    borderRadius: '4px',
+                                    cursor: 'pointer',
+                                  }}
+                                >
+                                  {isPendingRemoval ? 'Bekreft' : 'Fjern'}
+                                </button>
+                              </td>
+                            </tr>
+                          )
+                        })}
                       </tbody>
                     </table>
                   </>
@@ -2204,6 +2296,165 @@ function App() {
                 </tbody>
               </table>
             </section>
+          )}
+
+          {showStudentAddSubjectDialog && selectedStudent && (
+            <div
+              className="modal-overlay"
+              onClick={() => {
+                setShowStudentAddSubjectDialog(false)
+                setStudentAddSubjectCode('')
+                setStudentAddSubjectBlock('')
+              }}
+            >
+              <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+                <h3>Legg til fag for {selectedStudent.fullName}</h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '1rem' }}>
+                  <label>
+                    <strong>Velg fag:</strong>
+                    <select
+                      value={studentAddSubjectCode}
+                      onChange={(e) => {
+                        setStudentAddSubjectCode(e.target.value)
+                        setStudentAddSubjectBlock('')
+                      }}
+                      style={{ width: '100%', marginTop: '0.5rem', padding: '0.5rem' }}
+                    >
+                      <option value="">Velg fag...</option>
+                      {parsedData.subjects
+                        .filter((subject) => subject.blocks.length > 0)
+                        .slice()
+                        .sort((a, b) => a.name.localeCompare(b.name))
+                        .map((subject) => (
+                          <option key={subject.code} value={subject.code}>
+                            {subject.code} - {subject.name}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+
+                  {studentAddSubjectCode && (
+                    <div>
+                      <strong>Velg blokk og gruppe:</strong>
+                      <div style={{ marginTop: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                        {parsedData.groupBreakdowns
+                          .filter((group) => group.subjectCode === studentAddSubjectCode)
+                          .sort((a, b) => {
+                            const blockCompare = sortBlocks([a.block, b.block]).indexOf(a.block) - sortBlocks([a.block, b.block]).indexOf(a.block)
+                            if (blockCompare !== 0) return blockCompare
+                            return a.groupCode.localeCompare(b.groupCode)
+                          })
+                          .map((group) => (
+                            <button
+                              key={`${group.groupCode}-${group.block}`}
+                              type="button"
+                              onClick={() => setStudentAddSubjectBlock(`${group.groupCode}|${group.block}`)}
+                              className={studentAddSubjectBlock === `${group.groupCode}|${group.block}` ? 'filter-button active' : 'filter-button'}
+                              style={{
+                                padding: '0.75rem',
+                                textAlign: 'left',
+                                fontWeight: 'normal',
+                                backgroundColor: studentAddSubjectBlock === `${group.groupCode}|${group.block}` ? '#0969da' : '#f9fafb',
+                                color: studentAddSubjectBlock === `${group.groupCode}|${group.block}` ? '#ffffff' : '#24292f',
+                                border: studentAddSubjectBlock === `${group.groupCode}|${group.block}` ? '1px solid #0969da' : '1px solid #d0d7de',
+                              }}
+                            >
+                              {group.block} - {group.subjectName} ({group.studentCount} elever)
+                            </button>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!studentAddSubjectCode || !studentAddSubjectBlock) {
+                          alert('Vennligst velg fag og gruppe')
+                          return
+                        }
+
+                        const [groupCode, block] = studentAddSubjectBlock.split('|')
+                        const targetSubject = parsedData.subjects.find((s) => s.code === studentAddSubjectCode)
+                        if (!targetSubject) {
+                          alert('Fag ikke funnet')
+                          return
+                        }
+
+                        // Check if student already has this subject
+                        if (selectedStudent.assignments.some((a) => a.subjectCode === studentAddSubjectCode)) {
+                          alert(`${selectedStudent.fullName} har allerede ${targetSubject.name}`)
+                          return
+                        }
+
+                        // Add the subject to the student
+                        const updatedStudents = parsedData.students.map((student) => {
+                          if (student.id !== selectedStudent.id) {
+                            return student
+                          }
+
+                          return {
+                            ...student,
+                            assignments: [
+                              ...student.assignments,
+                              {
+                                subjectCode: studentAddSubjectCode,
+                                subjectName: targetSubject.name,
+                                groupCode,
+                                block,
+                              },
+                            ],
+                          }
+                        })
+
+                        // Recalculate breakdowns
+                        const { groupBreakdowns, blockBreakdowns } = recalculateBreakdowns(updatedStudents)
+
+                        // Update subjects with new student count
+                        const updatedSubjects = parsedData.subjects.map((subject) => {
+                          if (subject.code !== studentAddSubjectCode) {
+                            return subject
+                          }
+                          return {
+                            ...subject,
+                            studentCount: subject.studentCount + 1,
+                          }
+                        })
+
+                        setParsedData({
+                          ...parsedData,
+                          students: updatedStudents,
+                          subjects: updatedSubjects,
+                          groupBreakdowns,
+                          blockBreakdowns,
+                        })
+
+                        setBalanceMessage(`${targetSubject.name} (${groupCode}) lagt til for ${selectedStudent.fullName}`)
+                        setShowStudentAddSubjectDialog(false)
+                        setStudentAddSubjectCode('')
+                        setStudentAddSubjectBlock('')
+                      }}
+                      className="balance-button"
+                      disabled={!studentAddSubjectCode || !studentAddSubjectBlock}
+                    >
+                      Legg til
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowStudentAddSubjectDialog(false)
+                        setStudentAddSubjectCode('')
+                        setStudentAddSubjectBlock('')
+                      }}
+                      className="clear-results-button"
+                    >
+                      Avbryt
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
           )}
         </>
       )}
