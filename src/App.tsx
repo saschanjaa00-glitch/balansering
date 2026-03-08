@@ -1941,6 +1941,7 @@ function App() {
   const [errorMessage, setErrorMessage] = useState<string>('')
   const [selectedStudentsForMassUpdate, setSelectedStudentsForMassUpdate] = useState<Set<string>>(new Set())
   const [showMassUpdateDialog, setShowMassUpdateDialog] = useState<boolean>(false)
+  const [pendingMassRemoval, setPendingMassRemoval] = useState<boolean>(false)
   const [massUpdateTargetSubject, setMassUpdateTargetSubject] = useState<string>('')
   const [massUpdateTargetBlock, setMassUpdateTargetBlock] = useState<string>('')
   const [showAddSubjectDialog, setShowAddSubjectDialog] = useState<boolean>(false)
@@ -1980,6 +1981,7 @@ function App() {
     setErrorMessage('')
     setSelectedStudentsForMassUpdate(new Set())
     setShowMassUpdateDialog(false)
+    setPendingMassRemoval(false)
     setMassUpdateTargetSubject('')
     setMassUpdateTargetBlock('')
     setShowAddSubjectDialog(false)
@@ -3046,6 +3048,7 @@ function App() {
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation()
+                                    setPendingMassRemoval(false)
                                     setShowMassUpdateDialog(true)
                                   }}
                                   disabled={selectedStudentsForMassUpdate.size === 0}
@@ -3119,7 +3122,13 @@ function App() {
               </table>
 
               {showMassUpdateDialog && (
-                <div className="modal-overlay" onClick={() => setShowMassUpdateDialog(false)}>
+                <div
+                  className="modal-overlay"
+                  onClick={() => {
+                    setShowMassUpdateDialog(false)
+                    setPendingMassRemoval(false)
+                  }}
+                >
                   <div className="modal-content" onClick={(e) => e.stopPropagation()}>
                     <h3>Massoppdater elever</h3>
                     <p>{selectedStudentsForMassUpdate.size} elever valgt</p>
@@ -3226,6 +3235,7 @@ function App() {
                             // Clear selection and close dialog
                             setSelectedStudentsForMassUpdate(new Set())
                             setShowMassUpdateDialog(false)
+                            setPendingMassRemoval(false)
                             setMassUpdateTargetSubject('')
                             setMassUpdateTargetBlock('')
                             setSelectedGroupKey('')
@@ -3238,7 +3248,71 @@ function App() {
                         <button
                           type="button"
                           onClick={() => {
+                            if (!pendingMassRemoval) {
+                              setPendingMassRemoval(true)
+                              return
+                            }
+
+                            if (!selectedGroupKey) {
+                              alert('Ingen faggruppe er valgt')
+                              return
+                            }
+
+                            const [oldSubjectCode, oldGroupCode, oldBlock] = selectedGroupKey.split('-')
+                            const oldSubjectName =
+                              parsedData?.subjects.find((subject) => subject.code === oldSubjectCode)?.name || oldSubjectCode
+
+                            const updatedStudents = parsedData!.students.map((student) => {
+                              if (!selectedStudentsForMassUpdate.has(student.id)) {
+                                return student
+                              }
+
+                              return {
+                                ...student,
+                                assignments: student.assignments.filter(
+                                  (assignment) =>
+                                    !(
+                                      assignment.subjectCode === oldSubjectCode &&
+                                      assignment.groupCode === oldGroupCode &&
+                                      assignment.block === oldBlock
+                                    ),
+                                ),
+                              }
+                            })
+
+                            const {
+                              groupBreakdowns: newGroupBreakdowns,
+                              blockBreakdowns: newBlockBreakdowns,
+                            } = recalculateBreakdowns(updatedStudents)
+
+                            const updatedData = {
+                              ...parsedData!,
+                              students: updatedStudents,
+                              groupBreakdowns: newGroupBreakdowns,
+                              blockBreakdowns: newBlockBreakdowns,
+                            }
+                            setParsedData(updatedData)
+
+                            setBalanceMessage(
+                              `Masseoppdatering: ${selectedStudentsForMassUpdate.size} elever fjernet fra ${oldSubjectName} (${oldGroupCode}) i ${oldBlock}`,
+                            )
+
+                            setSelectedStudentsForMassUpdate(new Set())
                             setShowMassUpdateDialog(false)
+                            setPendingMassRemoval(false)
+                            setMassUpdateTargetSubject('')
+                            setMassUpdateTargetBlock('')
+                            setSelectedGroupKey('')
+                          }}
+                          className="clear-results-button"
+                        >
+                          {pendingMassRemoval ? 'Bekreft fjern' : 'Fjern'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowMassUpdateDialog(false)
+                            setPendingMassRemoval(false)
                             setMassUpdateTargetSubject('')
                             setMassUpdateTargetBlock('')
                           }}
