@@ -651,6 +651,144 @@ function advancedBalanceAlgorithm(
     return anyMoves
   }
 
+  // Step 2b: N-way swaps within single student's assignments
+  const tryStudentNWaySwaps = (): boolean => {
+    let anyImprovement = false
+
+    // Find students who have subjects in overfull slots
+    for (const studentId of studentAssignments.keys()) {
+      if (processedStudents.has(studentId)) continue
+
+      const student = students.find((s) => s.id === studentId)
+      if (!student) continue
+
+      const assignments = studentAssignments.get(studentId) || new Map()
+      const subjectSlots: Array<{ subject: string; slot: string }> = []
+
+      // Collect this student's subjects and their current slots
+      for (const [subject, slot] of assignments) {
+        if (slot) {
+          subjectSlots.push({ subject, slot })
+        }
+      }
+
+      if (subjectSlots.length < 2) continue
+
+      // Check if any of this student's subjects are in overfull slots
+      const hasOverfull = subjectSlots.some(({ subject, slot }) => {
+        const count = timeslotEnrollment.get(slot)?.get(subject) || 0
+        return count > TIMESLOT_CAPACITY
+      })
+
+      if (!hasOverfull) continue
+
+      // Try n-way swaps (up to 3 subjects)
+      const subjectIndices = Array.from({ length: subjectSlots.length }, (_, i) => i)
+
+      // Try swaps of different lengths (1-swap, 2-swap, 3-swap)
+      for (let swapLength = 1; swapLength <= Math.min(3, subjectSlots.length); swapLength++) {
+        // Generate all cycles of length swapLength
+        const generateCycles = (start: number, length: number, visited: Set<number> = new Set()): number[][] => {
+          if (length === 0) return [[]]
+          if (length === 1) return [[start]]
+
+          const result: number[][] = []
+          for (let i = 0; i < subjectIndices.length; i++) {
+            if (i === start || visited.has(i)) continue
+            const newVisited = new Set(visited)
+            newVisited.add(i)
+            const subCycles = generateCycles(i, length - 1, newVisited)
+            for (const cycle of subCycles) {
+              result.push([start, ...cycle])
+            }
+          }
+          return result
+        }
+
+        // Try all cycles starting from each position
+        for (let startIdx = 0; startIdx < subjectSlots.length; startIdx++) {
+          const cycles = generateCycles(startIdx, swapLength)
+
+          for (const cycle of cycles) {
+            let isValid = true
+            const swapPlan: Array<{ subject: string; fromSlot: string; toSlot: string }> = []
+
+            // Build and validate the swap plan
+            for (let i = 0; i < cycle.length; i++) {
+              const fromIdx = cycle[i]
+              const toIdx = cycle[(i + 1) % cycle.length]
+
+              const fromItem = subjectSlots[fromIdx]
+              const toItem = subjectSlots[toIdx]
+
+              if (!fromItem || !toItem) {
+                isValid = false
+                break
+              }
+
+              const subject = fromItem.subject
+              const fromSlot = fromItem.slot
+              const toSlot = toItem.slot
+
+              // Can't move to same slot
+              if (fromSlot === toSlot) {
+                isValid = false
+                break
+              }
+
+              // Check if target slot has capacity for this subject
+              const currentCount = timeslotEnrollment.get(toSlot)?.get(subject) || 0
+              const afterSwapCount = currentCount + 1
+
+              if (afterSwapCount > TIMESLOT_CAPACITY) {
+                isValid = false
+                break
+              }
+
+              swapPlan.push({ subject, fromSlot, toSlot })
+            }
+
+            // If this cycle is valid AND it helps (moves something from overfull), execute it
+            if (isValid && swapPlan.length === cycle.length) {
+              const hasOverfullRelief = swapPlan.some(({ subject, fromSlot }) => {
+                const count = timeslotEnrollment.get(fromSlot)?.get(subject) || 0
+                return count > TIMESLOT_CAPACITY
+              })
+
+              if (hasOverfullRelief) {
+                // Execute the swap plan
+                for (const { subject, fromSlot, toSlot } of swapPlan) {
+                  // Update enrollment
+                  timeslotEnrollment.get(fromSlot)?.set(subject, (timeslotEnrollment.get(fromSlot)?.get(subject) || 0) - 1)
+                  timeslotEnrollment.get(toSlot)?.set(subject, (timeslotEnrollment.get(toSlot)?.get(subject) || 0) + 1)
+
+                  // Update student assignment
+                  assignments.set(subject, toSlot)
+
+                  // Record change
+                  changes.push({
+                    studentId,
+                    studentName: student.fullName,
+                    subjectCode: subject,
+                    subjectName: student.assignments.find((a) => a.subjectCode === subject)?.subjectName || subject,
+                    fromTimeslot: fromSlot,
+                    toTimeslot: toSlot,
+                    reason: `N-way omfordeling (${swapLength}-swap)`,
+                  })
+                }
+
+                anyImprovement = true
+                return anyImprovement
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return anyImprovement
+  }
+
   // Step 3 & 4: Student swaps and chain swaps using local search
   const tryStudentSwaps = (): boolean => {
     let improved = false
@@ -732,6 +870,11 @@ function advancedBalanceAlgorithm(
       if (tryInternalSwap(subjectCode, timeslot)) {
         madeProgress = true
       }
+    }
+
+    // Try n-way swaps within single student's assignments
+    if (tryStudentNWaySwaps()) {
+      madeProgress = true
     }
 
     // Try student swaps
