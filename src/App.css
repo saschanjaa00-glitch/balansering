@@ -142,9 +142,7 @@
   border-radius: 14px;
   border: 1px solid var(--line-soft);
   background: #fafdff;
-  display: grid;
-  gap: 0.65rem;
-  grid-template-columns: 1.2fr 1fr 0.95fr auto;
+  display: flex;
   align-items: center;
 }
 
@@ -152,6 +150,24 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.4rem;
+}
+
+.secondary-controls-row {
+  margin-top: 0.55rem;
+  padding: 0.7rem;
+  border-radius: 12px;
+  border: 1px solid var(--line-soft);
+  background: #fafdff;
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: 1.2fr 1fr 0.95fr auto;
+  align-items: center;
+}
+
+.student-filter-actions {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
 }
 
 input,
@@ -688,7 +704,7 @@ th {
 }
 
 @media (max-width: 1080px) {
-  .controls-row {
+  .secondary-controls-row {
     grid-template-columns: 1fr 1fr;
   }
 
@@ -716,7 +732,7 @@ th {
     padding: 0.85rem 0.65rem 1.25rem;
   }
 
-  .controls-row {
+  .secondary-controls-row {
     grid-template-columns: 1fr;
   }
 

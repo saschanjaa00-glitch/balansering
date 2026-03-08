@@ -113,6 +113,9 @@ type PersistedUiState = {
   viewMode: 'students' | 'subjects'
   onlyBlokkfag: boolean
   showIncompleteBlocks: boolean
+  showOverloadedStudents: boolean
+  showBlockCollisions: boolean
+  showDuplicateSubjects: boolean
 }
 
 function loadFromLocalStorage<T>(key: string, fallbackValue: T): T {
@@ -137,6 +140,49 @@ function saveToLocalStorage<T>(key: string, value: T): void {
 
 function getMaxCapacityForSubject(subjectName: string): number {
   return SUBJECT_MAX_CAPACITY[subjectName] || 30
+}
+
+function countNumberedBlockAssignments(student: StudentRecord): number {
+  return student.assignments.filter((assignment) => /^Blokk [1-4]$/u.test(assignment.block)).length
+}
+
+function hasMissingSubjects(student: StudentRecord): boolean {
+  const blocksWithSubjects = new Set<string>()
+  student.assignments.forEach((assignment) => {
+    if (/^Blokk [1-4]$/u.test(assignment.block)) {
+      blocksWithSubjects.add(assignment.block)
+    }
+  })
+  return blocksWithSubjects.size < 3
+}
+
+function hasTooManySubjects(student: StudentRecord): boolean {
+  return countNumberedBlockAssignments(student) >= 4
+}
+
+function hasBlockCollisions(student: StudentRecord): boolean {
+  const blockUsageCount = new Map<string, number>()
+
+  student.assignments.forEach((assignment) => {
+    if (!/^Blokk [1-4]$/u.test(assignment.block)) {
+      return
+    }
+    const currentCount = blockUsageCount.get(assignment.block) || 0
+    blockUsageCount.set(assignment.block, currentCount + 1)
+  })
+
+  return Array.from(blockUsageCount.values()).some((count) => count > 1)
+}
+
+function hasDuplicateSubjects(student: StudentRecord): boolean {
+  const seenSubjectCodes = new Set<string>()
+  for (const assignment of student.assignments) {
+    if (seenSubjectCodes.has(assignment.subjectCode)) {
+      return true
+    }
+    seenSubjectCodes.add(assignment.subjectCode)
+  }
+  return false
 }
 
 function balanceGroups(students: StudentRecord[], debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void): { changes: BalanceChange[]; overcrowdedCount: number } {
@@ -943,6 +989,9 @@ function App() {
       viewMode: 'students',
       onlyBlokkfag: true,
       showIncompleteBlocks: false,
+      showOverloadedStudents: false,
+      showBlockCollisions: false,
+      showDuplicateSubjects: false,
     })
   )
 
@@ -957,6 +1006,9 @@ function App() {
   const [selectedGroupKey, setSelectedGroupKey] = useState<string>('')
   const [onlyBlokkfag, setOnlyBlokkfag] = useState<boolean>(persistedUiState.onlyBlokkfag)
   const [showIncompleteBlocks, setShowIncompleteBlocks] = useState<boolean>(persistedUiState.showIncompleteBlocks)
+  const [showOverloadedStudents, setShowOverloadedStudents] = useState<boolean>(persistedUiState.showOverloadedStudents)
+  const [showBlockCollisions, setShowBlockCollisions] = useState<boolean>(persistedUiState.showBlockCollisions)
+  const [showDuplicateSubjects, setShowDuplicateSubjects] = useState<boolean>(persistedUiState.showDuplicateSubjects)
   const [balanceResults, setBalanceResults] = useState<BalanceChange[] | null>(null)
   const [balanceMessage, setBalanceMessage] = useState<string>('')
   const [debugGroups, setDebugGroups] = useState<Array<{ key: string; count: number; maxCap: number; status: string }>>([])
@@ -981,9 +1033,12 @@ function App() {
       viewMode,
       onlyBlokkfag,
       showIncompleteBlocks,
+      showOverloadedStudents,
+      showBlockCollisions,
+      showDuplicateSubjects,
     }
     saveToLocalStorage(STORAGE_KEYS.uiState, stateToPersist)
-  }, [selectedStudentId, studentQuery, subjectQuery, blockFilter, viewMode, onlyBlokkfag, showIncompleteBlocks])
+  }, [selectedStudentId, studentQuery, subjectQuery, blockFilter, viewMode, onlyBlokkfag, showIncompleteBlocks, showOverloadedStudents, showBlockCollisions, showDuplicateSubjects])
 
   const selectedStudent = useMemo(() => {
     if (!parsedData || !selectedStudentId) {
@@ -1005,18 +1060,67 @@ function App() {
       if (!matchesSearch) {
         return false
       }
+
       if (showIncompleteBlocks) {
-        const blocksWithSubjects = new Set<string>()
-        student.assignments.forEach((assignment) => {
-          if (/^Blokk [1-4]$/.test(assignment.block)) {
-            blocksWithSubjects.add(assignment.block)
-          }
-        })
-        return blocksWithSubjects.size < 3
+        if (!hasMissingSubjects(student)) {
+          return false
+        }
       }
+
+      if (showOverloadedStudents && !hasTooManySubjects(student)) {
+        return false
+      }
+
+      if (showBlockCollisions && !hasBlockCollisions(student)) {
+        return false
+      }
+
+      if (showDuplicateSubjects && !hasDuplicateSubjects(student)) {
+        return false
+      }
+
       return true
     })
-  }, [parsedData, studentQuery, showIncompleteBlocks])
+  }, [parsedData, studentQuery, showIncompleteBlocks, showOverloadedStudents, showBlockCollisions, showDuplicateSubjects])
+
+  useEffect(() => {
+    if (viewMode !== 'students') {
+      return
+    }
+
+    if (filteredStudents.length === 0) {
+      if (selectedStudentId) {
+        setSelectedStudentId('')
+      }
+      return
+    }
+
+    const selectedStudentStillVisible = filteredStudents.some((student) => student.id === selectedStudentId)
+    if (!selectedStudentStillVisible) {
+      setSelectedStudentId(filteredStudents[0].id)
+    }
+  }, [viewMode, filteredStudents, selectedStudentId])
+
+  const studentFilterCounts = useMemo(() => {
+    if (!parsedData) {
+      return { missingSubjectsCount: 0, tooManySubjectsCount: 0, blockCollisionsCount: 0, duplicateSubjectsCount: 0 }
+    }
+
+    const needle = studentQuery.trim().toLowerCase()
+    const eligibleStudents = parsedData.students.filter((student) => {
+      if (EXCLUDED_CLASS_GROUPS.has(student.classGroup)) {
+        return false
+      }
+      return !needle || student.fullName.toLowerCase().includes(needle) || student.id.includes(needle)
+    })
+
+    return {
+      missingSubjectsCount: eligibleStudents.filter((student) => hasMissingSubjects(student)).length,
+      tooManySubjectsCount: eligibleStudents.filter((student) => hasTooManySubjects(student)).length,
+      blockCollisionsCount: eligibleStudents.filter((student) => hasBlockCollisions(student)).length,
+      duplicateSubjectsCount: eligibleStudents.filter((student) => hasDuplicateSubjects(student)).length,
+    }
+  }, [parsedData, studentQuery])
 
   const filteredAssignments = useMemo(() => {
     if (!selectedStudent) {
@@ -1265,7 +1369,9 @@ function App() {
                 Fagvisning
               </button>
             </div>
+          </section>
 
+          <section className="secondary-controls-row">
             <input
               type="search"
               value={subjectQuery}
@@ -1290,6 +1396,39 @@ function App() {
                 </option>
               ))}
             </select>
+
+            {viewMode === 'students' && (
+              <div className="student-filter-actions">
+                <button
+                  type="button"
+                  onClick={() => setShowIncompleteBlocks(!showIncompleteBlocks)}
+                  className={`filter-button ${showIncompleteBlocks ? 'active' : ''}`}
+                >
+                  Mangler fag ({studentFilterCounts.missingSubjectsCount})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowOverloadedStudents(!showOverloadedStudents)}
+                  className={`filter-button ${showOverloadedStudents ? 'active' : ''}`}
+                >
+                  For mange fag ({studentFilterCounts.tooManySubjectsCount})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowBlockCollisions(!showBlockCollisions)}
+                  className={`filter-button ${showBlockCollisions ? 'active' : ''}`}
+                >
+                  Blokk-kollisjoner ({studentFilterCounts.blockCollisionsCount})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowDuplicateSubjects(!showDuplicateSubjects)}
+                  className={`filter-button ${showDuplicateSubjects ? 'active' : ''}`}
+                >
+                  Duplikater ({studentFilterCounts.duplicateSubjectsCount})
+                </button>
+              </div>
+            )}
           </section>
 
           {viewMode === 'students' ? (
@@ -1301,14 +1440,6 @@ function App() {
                   onChange={(event) => setStudentQuery(event.target.value)}
                   placeholder="Søk elevnavn eller nummer"
                 />
-
-                <button
-                  type="button"
-                  onClick={() => setShowIncompleteBlocks(!showIncompleteBlocks)}
-                  className={`filter-button ${showIncompleteBlocks ? 'active' : ''}`}
-                >
-                  Vis kun mangler 2+ blokker
-                </button>
 
                 <div className="student-list">
                   {filteredStudents.map((student) => (
