@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 
 type RawTable = {
@@ -98,6 +98,41 @@ const SUBJECT_MAX_CAPACITY: Record<string, number> = {
   'Kjemi 2': 24,
   'Biologi 1': 28,
   'Biologi 2': 28,
+}
+
+const STORAGE_KEYS = {
+  parsedData: 'novaschem.parsedData.v1',
+  uiState: 'novaschem.uiState.v1',
+}
+
+type PersistedUiState = {
+  selectedStudentId: string
+  studentQuery: string
+  subjectQuery: string
+  blockFilter: string
+  viewMode: 'students' | 'subjects'
+  onlyBlokkfag: boolean
+  showIncompleteBlocks: boolean
+}
+
+function loadFromLocalStorage<T>(key: string, fallbackValue: T): T {
+  try {
+    const rawValue = window.localStorage.getItem(key)
+    if (!rawValue) {
+      return fallbackValue
+    }
+    return JSON.parse(rawValue) as T
+  } catch {
+    return fallbackValue
+  }
+}
+
+function saveToLocalStorage<T>(key: string, value: T): void {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    // Ignore storage errors (private mode, quota limits, etc.)
+  }
 }
 
 function getMaxCapacityForSubject(subjectName: string): number {
@@ -899,15 +934,29 @@ function parseNovaschemExport(rawText: string): ParsedData {
 }
 
 function App() {
-  const [parsedData, setParsedData] = useState<ParsedData | null>(null)
-  const [selectedStudentId, setSelectedStudentId] = useState<string>('')
-  const [studentQuery, setStudentQuery] = useState<string>('')
-  const [subjectQuery, setSubjectQuery] = useState<string>('')
-  const [blockFilter, setBlockFilter] = useState<string>('')
-  const [viewMode, setViewMode] = useState<'students' | 'subjects'>('students')
+  const [persistedUiState] = useState<PersistedUiState>(() =>
+    loadFromLocalStorage<PersistedUiState>(STORAGE_KEYS.uiState, {
+      selectedStudentId: '',
+      studentQuery: '',
+      subjectQuery: '',
+      blockFilter: '',
+      viewMode: 'students',
+      onlyBlokkfag: true,
+      showIncompleteBlocks: false,
+    })
+  )
+
+  const [parsedData, setParsedData] = useState<ParsedData | null>(() =>
+    loadFromLocalStorage<ParsedData | null>(STORAGE_KEYS.parsedData, null)
+  )
+  const [selectedStudentId, setSelectedStudentId] = useState<string>(persistedUiState.selectedStudentId)
+  const [studentQuery, setStudentQuery] = useState<string>(persistedUiState.studentQuery)
+  const [subjectQuery, setSubjectQuery] = useState<string>(persistedUiState.subjectQuery)
+  const [blockFilter, setBlockFilter] = useState<string>(persistedUiState.blockFilter)
+  const [viewMode, setViewMode] = useState<'students' | 'subjects'>(persistedUiState.viewMode)
   const [selectedGroupKey, setSelectedGroupKey] = useState<string>('')
-  const [onlyBlokkfag, setOnlyBlokkfag] = useState<boolean>(true)
-  const [showIncompleteBlocks, setShowIncompleteBlocks] = useState<boolean>(false)
+  const [onlyBlokkfag, setOnlyBlokkfag] = useState<boolean>(persistedUiState.onlyBlokkfag)
+  const [showIncompleteBlocks, setShowIncompleteBlocks] = useState<boolean>(persistedUiState.showIncompleteBlocks)
   const [balanceResults, setBalanceResults] = useState<BalanceChange[] | null>(null)
   const [balanceMessage, setBalanceMessage] = useState<string>('')
   const [debugGroups, setDebugGroups] = useState<Array<{ key: string; count: number; maxCap: number; status: string }>>([])
@@ -918,6 +967,23 @@ function App() {
   const [showMassUpdateDialog, setShowMassUpdateDialog] = useState<boolean>(false)
   const [massUpdateTargetSubject, setMassUpdateTargetSubject] = useState<string>('')
   const [massUpdateTargetBlock, setMassUpdateTargetBlock] = useState<string>('')
+
+  useEffect(() => {
+    saveToLocalStorage(STORAGE_KEYS.parsedData, parsedData)
+  }, [parsedData])
+
+  useEffect(() => {
+    const stateToPersist: PersistedUiState = {
+      selectedStudentId,
+      studentQuery,
+      subjectQuery,
+      blockFilter,
+      viewMode,
+      onlyBlokkfag,
+      showIncompleteBlocks,
+    }
+    saveToLocalStorage(STORAGE_KEYS.uiState, stateToPersist)
+  }, [selectedStudentId, studentQuery, subjectQuery, blockFilter, viewMode, onlyBlokkfag, showIncompleteBlocks])
 
   const selectedStudent = useMemo(() => {
     if (!parsedData || !selectedStudentId) {
@@ -967,7 +1033,32 @@ function App() {
       return matchesSubject && matchesBlock && (!onlyBlokkfag || isBlokkfag)
     })
 
-    return filtered
+    const getAssignmentBlockSortRank = (block: string): number => {
+      const trimmed = block.trim()
+      const numericMatch = trimmed.match(/^Blokk (\d+)$/u)
+      if (numericMatch) {
+        return parseInt(numericMatch[1], 10)
+      }
+      if (trimmed === 'MATTE') {
+        return 999
+      }
+      return 500
+    }
+
+    return filtered.sort((a, b) => {
+      const rankA = getAssignmentBlockSortRank(a.block)
+      const rankB = getAssignmentBlockSortRank(b.block)
+      if (rankA !== rankB) {
+        return rankA - rankB
+      }
+
+      const blockCmp = a.block.localeCompare(b.block)
+      if (blockCmp !== 0) {
+        return blockCmp
+      }
+
+      return a.subjectName.localeCompare(b.subjectName)
+    })
   }, [selectedStudent, subjectQuery, blockFilter, onlyBlokkfag])
 
   const filteredSubjects = useMemo(() => {
@@ -1025,9 +1116,12 @@ function App() {
           item.subjectCode.toLowerCase().includes(needle) ||
           item.subjectName.toLowerCase().includes(needle) ||
           item.groupCode.toLowerCase().includes(needle)
-        const matchesBlock = !blockFilter || item.block === blockFilter
         const isBlokkfag = item.block && item.block.trim().length > 0
-        return matchesSearch && matchesBlock && (!onlyBlokkfag || isBlokkfag)
+         const isStandardBlock = /^Blokk \d+$/u.test(item.block)
+         const matchesBlock = !blockFilter || item.block === blockFilter
+         // Only show standard blocks (Blokk 1, Blokk 2, etc.) unless a specific block filter is selected
+         const shouldIncludeBlock = blockFilter ? matchesBlock : isStandardBlock
+         return matchesSearch && shouldIncludeBlock && (!onlyBlokkfag || isBlokkfag)
       })
       .sort((a, b) => {
         // Compare blocks using same logic as sortBlocks
@@ -1259,6 +1353,7 @@ function App() {
                         {filteredAssignments.map((assignment) => (
                           <tr
                             key={`${assignment.subjectCode}-${assignment.groupCode}-${assignment.block}`}
+                            className={assignment.block === 'MATTE' ? 'matte-assignment-row' : ''}
                           >
                             <td>{assignment.subjectCode}</td>
                             <td>{assignment.subjectName}</td>
@@ -1433,7 +1528,10 @@ function App() {
               <h2>Per blokk</h2>
               <div className="block-summary-grid">
                 {parsedData.blockBreakdowns
-                  .filter((item) => !blockFilter || item.block === blockFilter)
+                  .filter((item) => {
+                    const isStandardBlock = /^Blokk \d+$/u.test(item.block)
+                    return blockFilter ? item.block === blockFilter : isStandardBlock
+                  })
                   .map((item) => {
                     const blockDelta = balanceBlockDeltaCounts.get(item.block)
                     return (
