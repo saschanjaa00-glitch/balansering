@@ -70,6 +70,13 @@ const SUFFIX_BLOCKS: Record<string, string> = {
   D: 'Blokk 4',
 }
 
+const BLOCK_SUFFIX_BY_NAME: Record<string, string> = {
+  'Blokk 1': 'A',
+  'Blokk 2': 'B',
+  'Blokk 3': 'C',
+  'Blokk 4': 'D',
+}
+
 const CUSTOM_SUBJECT_BLOCKS: Record<string, string> = {
   '2MAR5': 'MATTE',
   '2MAP3': 'MATTE',
@@ -138,6 +145,14 @@ function saveToLocalStorage<T>(key: string, value: T): void {
   }
 }
 
+function removeFromLocalStorage(key: string): void {
+  try {
+    window.localStorage.removeItem(key)
+  } catch {
+    // Ignore storage errors (private mode, quota limits, etc.)
+  }
+}
+
 function getMaxCapacityForSubject(subjectName: string): number {
   return SUBJECT_MAX_CAPACITY[subjectName] || 30
 }
@@ -183,6 +198,11 @@ function hasDuplicateSubjects(student: StudentRecord): boolean {
     seenSubjectCodes.add(assignment.subjectCode)
   }
   return false
+}
+
+function createDefaultGroupCode(subjectCode: string, block: string): string {
+  const suffix = BLOCK_SUFFIX_BY_NAME[block]
+  return suffix ? `${subjectCode}${suffix}` : subjectCode
 }
 
 function balanceGroups(students: StudentRecord[], debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void): { changes: BalanceChange[]; overcrowdedCount: number } {
@@ -1019,6 +1039,40 @@ function App() {
   const [showMassUpdateDialog, setShowMassUpdateDialog] = useState<boolean>(false)
   const [massUpdateTargetSubject, setMassUpdateTargetSubject] = useState<string>('')
   const [massUpdateTargetBlock, setMassUpdateTargetBlock] = useState<string>('')
+  const [showAddSubjectDialog, setShowAddSubjectDialog] = useState<boolean>(false)
+  const [addSubjectTargetCode, setAddSubjectTargetCode] = useState<string>('')
+  const [addSubjectTargetBlock, setAddSubjectTargetBlock] = useState<string>('')
+
+  const clearStoredData = (): void => {
+    removeFromLocalStorage(STORAGE_KEYS.parsedData)
+    removeFromLocalStorage(STORAGE_KEYS.uiState)
+
+    setParsedData(null)
+    setSelectedStudentId('')
+    setStudentQuery('')
+    setSubjectQuery('')
+    setBlockFilter('')
+    setViewMode('students')
+    setSelectedGroupKey('')
+    setOnlyBlokkfag(true)
+    setShowIncompleteBlocks(false)
+    setShowOverloadedStudents(false)
+    setShowBlockCollisions(false)
+    setShowDuplicateSubjects(false)
+    setBalanceResults(null)
+    setBalanceMessage('')
+    setDebugGroups([])
+    setBalanceDeltaCounts(new Map())
+    setBalanceBlockDeltaCounts(new Map())
+    setErrorMessage('')
+    setSelectedStudentsForMassUpdate(new Set())
+    setShowMassUpdateDialog(false)
+    setMassUpdateTargetSubject('')
+    setMassUpdateTargetBlock('')
+    setShowAddSubjectDialog(false)
+    setAddSubjectTargetCode('')
+    setAddSubjectTargetBlock('')
+  }
 
   useEffect(() => {
     saveToLocalStorage(STORAGE_KEYS.parsedData, parsedData)
@@ -1327,6 +1381,11 @@ function App() {
           Velg Novaschem TXT-fil
         </label>
         <input id="novaschem-file" type="file" accept=".txt" onChange={handleFileUpload} />
+        <div className="storage-controls">
+          <button type="button" onClick={clearStoredData} className="storage-button danger">
+            Tøm lagret data
+          </button>
+        </div>
         {errorMessage && <p className="error-text">{errorMessage}</p>}
         {parsedData && (
           <div className="stats-grid">
@@ -1504,9 +1563,17 @@ function App() {
             <section className="subject-panel">
               <div className="subject-view-header">
                 <h2>Fagvisning</h2>
-                <button
-                  type="button"
-                  onClick={() => {
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setShowAddSubjectDialog(true)}
+                    className="balance-button"
+                  >
+                    Legg til fag
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
                     // Calculate original group occupancy
                     const originalCounts = new Map<string, number>()
                     parsedData.groupBreakdowns.forEach((item) => {
@@ -1579,11 +1646,12 @@ function App() {
                       const uniqueStudents = new Set(result.changes.map((c) => c.studentId))
                       setBalanceMessage(`Fant ${result.overcrowdedCount} overfull(e) gruppe(r). Flyttet ${uniqueStudents.size} elev(er) (${result.changes.length} fagendringer).`)
                     }
-                  }}
-                  className="balance-button"
-                >
-                  Balanser
-                </button>
+                    }}
+                    className="balance-button"
+                  >
+                    Balanser
+                  </button>
+                </div>
               </div>
 
               {balanceResults !== null && (
@@ -1964,6 +2032,145 @@ function App() {
                             setShowMassUpdateDialog(false)
                             setMassUpdateTargetSubject('')
                             setMassUpdateTargetBlock('')
+                          }}
+                          className="clear-results-button"
+                        >
+                          Avbryt
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {showAddSubjectDialog && (
+                <div
+                  className="modal-overlay"
+                  onClick={() => {
+                    setShowAddSubjectDialog(false)
+                    setAddSubjectTargetCode('')
+                    setAddSubjectTargetBlock('')
+                  }}
+                >
+                  <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+                    <h3>Legg til fag</h3>
+                    <p>Legg til fag som tilgjengelig i valgt blokk (uten å tildele elever).</p>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '1rem' }}>
+                      <label>
+                        <strong>Fag:</strong>
+                        <select
+                          value={addSubjectTargetCode}
+                          onChange={(e) => setAddSubjectTargetCode(e.target.value)}
+                          style={{ width: '100%', marginTop: '0.5rem', padding: '0.5rem' }}
+                        >
+                          <option value="">Velg fag...</option>
+                          {parsedData.subjects
+                            .filter((subject) => subject.blocks.length > 0)
+                            .slice()
+                            .sort((a, b) => a.name.localeCompare(b.name))
+                            .map((subject) => (
+                              <option key={subject.code} value={subject.code}>
+                                {subject.code} - {subject.name}
+                              </option>
+                            ))}
+                        </select>
+                      </label>
+
+                      <label>
+                        <strong>Blokk:</strong>
+                        <select
+                          value={addSubjectTargetBlock}
+                          onChange={(e) => setAddSubjectTargetBlock(e.target.value)}
+                          style={{ width: '100%', marginTop: '0.5rem', padding: '0.5rem' }}
+                        >
+                          <option value="">Velg blokk...</option>
+                          <option value="Blokk 1">Blokk 1</option>
+                          <option value="Blokk 2">Blokk 2</option>
+                          <option value="Blokk 3">Blokk 3</option>
+                          <option value="Blokk 4">Blokk 4</option>
+                        </select>
+                      </label>
+
+                      <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!addSubjectTargetCode || !addSubjectTargetBlock) {
+                              alert('Vennligst velg både fag og blokk')
+                              return
+                            }
+
+                            const targetSubject = parsedData.subjects.find((subject) => subject.code === addSubjectTargetCode)
+                            if (!targetSubject) {
+                              alert('Fag ikke funnet')
+                              return
+                            }
+
+                            const updatedSubjects = parsedData.subjects.map((subject) => {
+                              if (subject.code !== addSubjectTargetCode) {
+                                return subject
+                              }
+
+                              const nextBlocks = subject.blocks.includes(addSubjectTargetBlock)
+                                ? subject.blocks
+                                : sortBlocks([...subject.blocks, addSubjectTargetBlock])
+
+                              return {
+                                ...subject,
+                                blocks: nextBlocks,
+                              }
+                            })
+
+                            const updatedBlocks = parsedData.blocks.includes(addSubjectTargetBlock)
+                              ? parsedData.blocks
+                              : sortBlocks([...parsedData.blocks, addSubjectTargetBlock])
+
+                            const hasGroupInTargetBlock = parsedData.groupBreakdowns.some(
+                              (group) => group.subjectCode === addSubjectTargetCode && group.block === addSubjectTargetBlock
+                            )
+
+                            const updatedGroupBreakdowns = hasGroupInTargetBlock
+                              ? parsedData.groupBreakdowns
+                              : parsedData.groupBreakdowns.concat([
+                                  {
+                                    subjectCode: addSubjectTargetCode,
+                                    subjectName: targetSubject.name,
+                                    groupCode: createDefaultGroupCode(addSubjectTargetCode, addSubjectTargetBlock),
+                                    block: addSubjectTargetBlock,
+                                    studentCount: 0,
+                                  },
+                                ])
+
+                            const updatedData = {
+                              ...parsedData,
+                              subjects: updatedSubjects,
+                              blocks: updatedBlocks,
+                              groupBreakdowns: updatedGroupBreakdowns,
+                            }
+                            setParsedData(updatedData)
+
+                            const wasAlreadyAvailable = targetSubject.blocks.includes(addSubjectTargetBlock)
+                            if (wasAlreadyAvailable) {
+                              setBalanceMessage(`${targetSubject.name} er allerede tilgjengelig i ${addSubjectTargetBlock}.`)
+                            } else {
+                              setBalanceMessage(`${targetSubject.name} er nå tilgjengelig i ${addSubjectTargetBlock}.`)
+                            }
+
+                            setShowAddSubjectDialog(false)
+                            setAddSubjectTargetCode('')
+                            setAddSubjectTargetBlock('')
+                          }}
+                          className="balance-button"
+                          disabled={!addSubjectTargetCode || !addSubjectTargetBlock}
+                        >
+                          Legg til
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowAddSubjectDialog(false)
+                            setAddSubjectTargetCode('')
+                            setAddSubjectTargetBlock('')
                           }}
                           className="clear-results-button"
                         >
