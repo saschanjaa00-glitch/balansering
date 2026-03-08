@@ -382,6 +382,31 @@ button {
   border-bottom: none;
 }
 
+.balance-run-segment {
+  margin-top: 0.45rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid #edf2f8;
+}
+
+.balance-run-segment:first-of-type {
+  border-top: none;
+  padding-top: 0.2rem;
+}
+
+.balance-run-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  color: #5e7390;
+  font-size: 0.8rem;
+}
+
+.balance-run-meta span:last-child {
+  text-align: right;
+  white-space: nowrap;
+}
+
 .balance-change-line {
   margin-left: 1rem;
   margin-top: 0.3rem;
@@ -411,6 +436,10 @@ button {
 
 .clear-results-button {
   font-size: 0.9rem;
+}
+
+.balance-results .clear-results-button {
+  margin-right: 0.45rem;
 }
 
 .activity-log-panel {

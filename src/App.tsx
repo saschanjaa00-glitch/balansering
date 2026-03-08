@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
 type SourceTable = {
@@ -91,15 +91,14 @@ type BalanceChange = {
   toBlock: string
 }
 
-type AdvancedBalanceChange = {
-  studentId: string
-  studentName: string
-  subjectCode: string
-  subjectName: string
-  fromTimeslot: string
-  toTimeslot: string
-  reason: string
+type BalanceResultRun = {
+  id: string
+  createdAt: string
+  message: string
+  changes: BalanceChange[]
 }
+
+
 
 const SUFFIX_BLOCKS: Record<string, string> = {
   A: 'Blokk 1',
@@ -148,6 +147,7 @@ const SUBJECT_MAX_CAPACITY: Record<string, number> = {
 const STORAGE_KEYS = {
   parsedData: 'novaschem.parsedData.v1',
   uiState: 'novaschem.uiState.v1',
+  balanceHistory: 'novaschem.balanceHistory.v1',
 }
 
 type PersistedUiState = {
@@ -189,6 +189,60 @@ function removeFromLocalStorage(key: string): void {
   } catch {
     // Ignore storage errors (private mode, quota limits, etc.)
   }
+}
+
+function summarizeBalanceChanges(rawChanges: BalanceChange[]): BalanceChange[] {
+  const byStudentAndSubject = new Map<string, BalanceChange>()
+  const keyOrder: string[] = []
+
+  rawChanges.forEach((change) => {
+    const key = `${change.studentId}|${change.subjectCode}`
+    const existing = byStudentAndSubject.get(key)
+
+    if (!existing) {
+      byStudentAndSubject.set(key, { ...change })
+      keyOrder.push(key)
+      return
+    }
+
+    // Keep first origin and latest destination within one run.
+    byStudentAndSubject.set(key, {
+      ...existing,
+      studentName: change.studentName || existing.studentName,
+      subjectName: change.subjectName || existing.subjectName,
+      toGroupCode: change.toGroupCode,
+      toBlock: change.toBlock,
+    })
+  })
+
+  return keyOrder
+    .map((key) => byStudentAndSubject.get(key))
+    .filter((change): change is BalanceChange => Boolean(change))
+    .filter((change) => !(change.fromBlock === change.toBlock && change.fromGroupCode === change.toGroupCode))
+}
+
+function formatTimestamp(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) {
+    return iso
+  }
+  return new Intl.DateTimeFormat('nb-NO', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(date)
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/gu, '&amp;')
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;')
+    .replace(/"/gu, '&quot;')
+    .replace(/'/gu, '&#39;')
 }
 
 function getMaxCapacityForSubject(subjectName: string): number {
@@ -243,13 +297,39 @@ function createDefaultGroupCode(subjectCode: string, block: string): string {
   return suffix ? `${subjectCode}${suffix}` : subjectCode
 }
 
+function canStudentMoveToBlock(student: StudentRecord, targetBlock: string): boolean {
+  const classGroup = (student.classGroup || '').trim().toUpperCase()
+
+  // VG2 students cannot be moved to Blokk 4.
+  if (/^2/u.test(classGroup) && targetBlock === 'Blokk 4') {
+    return false
+  }
+
+  // VG3 students cannot be moved to Blokk 1.
+  if (/^3/u.test(classGroup) && targetBlock === 'Blokk 1') {
+    return false
+  }
+
+  return true
+}
+
 function balanceGroupsWithOffset(
   students: StudentRecord[],
   maxCapacityOffset: number = 0,
   debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void
-): { changes: BalanceChange[]; overcrowdedCount: number } {
+): { changes: BalanceChange[]; overcrowdedCount: number; partnerLookaheadMoves: number } {
   const changes: BalanceChange[] = []
   const debugGroups: Array<{ key: string; count: number; maxCap: number; status: string }> = []
+  const studentsById = new Map<string, StudentRecord>(students.map((student) => [student.id, student]))
+  let partnerLookaheadMoves = 0
+
+  // Guard rails to keep look-ahead search responsive on large datasets.
+  const LOOKAHEAD_MAX_TARGET_GROUPS = 12
+  const LOOKAHEAD_MAX_PARTNERS_PER_GROUP = 20
+  const LOOKAHEAD_MAX_ATTEMPTS = 1600
+  const LOOKAHEAD_MAX_DEPTH1_STUDENTS = 120
+  const LOOKAHEAD_MAX_DEPTH2_STUDENTS = 40
+  let lookaheadAttempts = 0
 
   // Build group occupancy map: key = "subjectCode|groupCode|block", value = [studentIds]
   const groupOccupancy = new Map<string, string[]>()
@@ -313,7 +393,7 @@ function balanceGroupsWithOffset(
       const blockSet = new Set(blocks)
       for (const [otherKey, occupants] of groupOccupancy.entries()) {
         const [otherSubject, otherGroupCode, otherBlock] = otherKey.split('|')
-        if (otherSubject === subjectCode && !blockSet.has(otherBlock) && occupants.length < maxCap) {
+        if (otherSubject === subjectCode && !blockSet.has(otherBlock) && occupants.length < maxCap && canStudentMoveToBlock(student, otherBlock)) {
           changes.push({
             studentId,
             studentName: student.fullName,
@@ -387,6 +467,11 @@ function balanceGroupsWithOffset(
         const fromBlock = blocks[fromBlockIdx]
         const toBlock = blocks[toBlockIdx]
 
+        if (!canStudentMoveToBlock(student, toBlock)) {
+          isValid = false
+          break
+        }
+
         const assignments = blockAssignments.get(fromBlock) || []
         if (assignments.length === 0) {
           isValid = false
@@ -451,7 +536,148 @@ function balanceGroupsWithOffset(
     return false
   }
 
-  // Try to rebalance in phases: simple, then double, then triple
+  // Helper to try a partner-based switch with look-ahead.
+  // If a student is stuck, pick a student in an alternative group,
+  // try to move that partner via N-way swap, and then move the stuck student into the freed spot.
+  const tryDirectSwitchWithLookahead = (
+    studentId: string,
+    subjectCode: string,
+    groupCode: string,
+    block: string,
+    student: StudentRecord,
+    subjectName: string,
+    maxCap: number,
+    lookaheadDepth: number,
+    visitedStudentIds: Set<string> = new Set()
+  ): boolean => {
+    if (lookaheadDepth < 1) {
+      return false
+    }
+
+    const visited = new Set(visitedStudentIds)
+    visited.add(studentId)
+
+    const sourceKey = `${subjectCode}|${groupCode}|${block}`
+
+    // Candidate target groups for the same subject in other blocks.
+    const targetGroups = Array.from(groupOccupancy.entries())
+      .filter(([otherKey]) => {
+        const [otherSubject, , otherBlock] = otherKey.split('|')
+        return otherSubject === subjectCode && otherBlock !== block
+      })
+      .map(([otherKey, occupants]) => ({
+        key: otherKey,
+        count: occupants.length,
+      }))
+      .sort((a, b) => a.count - b.count)
+      .slice(0, LOOKAHEAD_MAX_TARGET_GROUPS)
+
+    for (const target of targetGroups) {
+      const [, targetGroupCode, targetBlock] = target.key.split('|')
+      const targetOccupants = [...(groupOccupancy.get(target.key) || [])]
+        .sort((aId, bId) => {
+          const aBlocks = new Set((studentsById.get(aId)?.assignments || []).map((a) => a.block)).size
+          const bBlocks = new Set((studentsById.get(bId)?.assignments || []).map((a) => a.block)).size
+          // Fewer occupied blocks usually means higher chance to find an open destination block.
+          return aBlocks - bBlocks
+        })
+        .slice(0, LOOKAHEAD_MAX_PARTNERS_PER_GROUP)
+
+      for (const partnerId of targetOccupants) {
+        if (lookaheadAttempts >= LOOKAHEAD_MAX_ATTEMPTS) {
+          return false
+        }
+        lookaheadAttempts++
+
+        if (partnerId === studentId) continue
+        if (visited.has(partnerId)) continue
+
+        const partner = studentsById.get(partnerId)
+        if (!partner) continue
+
+        // Keep partner look-ahead attempts transactional. If we cannot move
+        // the original student into the freed slot, revert all tentative moves.
+        const snapshotChangesLength = changes.length
+        const snapshotOccupancy = new Map<string, string[]>()
+        groupOccupancy.forEach((occupants, occupancyKey) => {
+          snapshotOccupancy.set(occupancyKey, [...occupants])
+        })
+
+        const restoreSnapshot = (): void => {
+          changes.splice(snapshotChangesLength)
+          groupOccupancy.clear()
+          snapshotOccupancy.forEach((occupants, occupancyKey) => {
+            groupOccupancy.set(occupancyKey, [...occupants])
+          })
+        }
+
+        // Look-ahead: give the partner a chance to escape via N-way swap first.
+        let movedPartner =
+          trySwapForStudent(partnerId, subjectCode, targetGroupCode, targetBlock, partner, subjectName, maxCap, 'double') ||
+          trySwapForStudent(partnerId, subjectCode, targetGroupCode, targetBlock, partner, subjectName, maxCap, 'triple') ||
+          trySwapForStudent(partnerId, subjectCode, targetGroupCode, targetBlock, partner, subjectName, maxCap, 'simple')
+
+        if (!movedPartner && lookaheadDepth > 1) {
+          // Recursive fallback: try to free the partner via another partner chain.
+          movedPartner = tryDirectSwitchWithLookahead(
+            partnerId,
+            subjectCode,
+            targetGroupCode,
+            targetBlock,
+            partner,
+            subjectName,
+            maxCap,
+            lookaheadDepth - 1,
+            visited
+          )
+        }
+
+        if (!movedPartner) {
+          restoreSnapshot()
+          continue
+        }
+
+        const targetCountAfterPartnerMove = (groupOccupancy.get(target.key) || []).length
+        if (targetCountAfterPartnerMove >= maxCap) {
+          restoreSnapshot()
+          continue
+        }
+
+        if (!canStudentMoveToBlock(student, targetBlock)) {
+          restoreSnapshot()
+          continue
+        }
+
+        // Move the stuck student into the newly freed target slot.
+        changes.push({
+          studentId,
+          studentName: student.fullName,
+          subjectCode,
+          subjectName,
+          fromGroupCode: groupCode,
+          fromBlock: block,
+          toGroupCode: targetGroupCode,
+          toBlock: targetBlock,
+        })
+
+        const sourceIndex = groupOccupancy.get(sourceKey)?.indexOf(studentId) ?? -1
+        if (sourceIndex !== -1) {
+          groupOccupancy.get(sourceKey)?.splice(sourceIndex, 1)
+        }
+        if (!groupOccupancy.has(target.key)) {
+          groupOccupancy.set(target.key, [])
+        }
+        groupOccupancy.get(target.key)?.push(studentId)
+
+        return true
+      }
+    }
+
+    return false
+  }
+
+  // Try to rebalance in phases: simple, then double, then triple,
+  // then partner look-ahead switches (depth 1, fallback depth 2 if depth 1 fails).
   overcrowded.forEach(({ key, count, studentIds }) => {
     const [subjectCode, groupCode, block] = key.split('|')
     const subjectName = students.flatMap((s) => s.assignments).find((a) => a.subjectCode === subjectCode)?.subjectName || ''
@@ -465,7 +691,7 @@ function balanceGroupsWithOffset(
     remainingStudents = remainingStudents.filter((studentId) => {
       if (moved >= needToMove) return true
 
-      const student = students.find((s) => s.id === studentId)
+      const student = studentsById.get(studentId)
       if (!student) return true
 
       if (trySwapForStudent(studentId, subjectCode, groupCode, block, student, subjectName, maxCap, 'simple')) {
@@ -479,7 +705,7 @@ function balanceGroupsWithOffset(
     remainingStudents = remainingStudents.filter((studentId) => {
       if (moved >= needToMove) return true
 
-      const student = students.find((s) => s.id === studentId)
+      const student = studentsById.get(studentId)
       if (!student) return true
 
       if (trySwapForStudent(studentId, subjectCode, groupCode, block, student, subjectName, maxCap, 'double')) {
@@ -490,19 +716,54 @@ function balanceGroupsWithOffset(
     })
 
     // Phase 3: Try triple swaps for remaining students
-    remainingStudents.forEach((studentId) => {
-      if (moved >= needToMove) return
+    remainingStudents = remainingStudents.filter((studentId) => {
+      if (moved >= needToMove) return true
 
-      const student = students.find((s) => s.id === studentId)
-      if (!student) return
+      const student = studentsById.get(studentId)
+      if (!student) return true
 
       if (trySwapForStudent(studentId, subjectCode, groupCode, block, student, subjectName, maxCap, 'triple')) {
         moved++
+        return false
       }
+      return true
     })
+
+    // Phase 4a: Try direct partner switches with depth-1 look-ahead.
+    let phase4Depth1Moves = 0
+    remainingStudents = remainingStudents.filter((studentId, index) => {
+      if (moved >= needToMove) return true
+      if (index >= LOOKAHEAD_MAX_DEPTH1_STUDENTS) return true
+
+      const student = studentsById.get(studentId)
+      if (!student) return true
+
+      if (tryDirectSwitchWithLookahead(studentId, subjectCode, groupCode, block, student, subjectName, maxCap, 1)) {
+        moved++
+        phase4Depth1Moves++
+        partnerLookaheadMoves++
+        return false
+      }
+      return true
+    })
+
+    // Phase 4b: If depth 1 made no progress at all, retry with depth 2.
+    if (moved < needToMove && phase4Depth1Moves === 0) {
+      remainingStudents.slice(0, LOOKAHEAD_MAX_DEPTH2_STUDENTS).forEach((studentId) => {
+        if (moved >= needToMove) return
+
+        const student = studentsById.get(studentId)
+        if (!student) return
+
+        if (tryDirectSwitchWithLookahead(studentId, subjectCode, groupCode, block, student, subjectName, maxCap, 2)) {
+          moved++
+          partnerLookaheadMoves++
+        }
+      })
+    }
   })
 
-  return { changes, overcrowdedCount: overcrowded.length }
+  return { changes, overcrowdedCount: overcrowded.length, partnerLookaheadMoves }
 }
 
 function progressiveBalanceGroups(
@@ -512,6 +773,7 @@ function progressiveBalanceGroups(
 ): { allChanges: BalanceChange[]; summary: string } {
   const allChanges: BalanceChange[] = []
   const offsets = []
+  let totalPartnerLookaheadMoves = 0
   
   // Generate offsets from maxOffset down to 0
   for (let i = maxOffset; i <= 0; i++) {
@@ -523,6 +785,7 @@ function progressiveBalanceGroups(
   
   for (const offset of offsets) {
     const result = balanceGroupsWithOffset(currentStudents, offset, debugCallback)
+    totalPartnerLookaheadMoves += result.partnerLookaheadMoves
     
     if (result.changes.length > 0) {
       // Apply the changes to get the new student state for next iteration
@@ -535,165 +798,12 @@ function progressiveBalanceGroups(
   }
 
   const uniqueStudents = new Set(allChanges.map((c) => c.studentId))
-  const summary = `Progressiv balansering fullført: ${uniqueStudents.size} elev(er) flyttet (${allChanges.length} fagendringer)`
+  const summary = `Progressiv balansering fullført: ${uniqueStudents.size} elev(er) flyttet (${allChanges.length} fagendringer, ${totalPartnerLookaheadMoves} partner-lookahead)`
 
   return { allChanges, summary }
 }
 
 // Advanced timeslot-based balancing algorithm
-function advancedBalanceAlgorithm(
-  students: StudentRecord[]
-): { changes: AdvancedBalanceChange[]; metrics: { moved: number; swaps: number; totalChanges: number } } {
-  const changes: AdvancedBalanceChange[] = []
-  const GROUP_CAPACITY = 30
-
-  // Build current assignments: {studentId -> {subjectCode -> groupCode}}
-  const studentAssignments = new Map<string, Map<string, string>>()
-  const groupEnrollment = new Map<string, number>() // {groupKey -> count} where groupKey = "subjectCode|groupCode|block"
-  const subjectGroups = new Map<string, Set<string>>() // {subjectCode -> Set of groupCodes}
-
-  // Initialize structures
-  students.forEach((student) => {
-    const assignments = new Map<string, string>()
-    student.assignments.forEach((assignment) => {
-      assignments.set(assignment.subjectCode, assignment.groupCode)
-      
-      // Track group enrollment
-      const groupKey = `${assignment.subjectCode}|${assignment.groupCode}|${assignment.block}`
-      groupEnrollment.set(groupKey, (groupEnrollment.get(groupKey) || 0) + 1)
-      
-      // Track available groups per subject
-      if (!subjectGroups.has(assignment.subjectCode)) {
-        subjectGroups.set(assignment.subjectCode, new Set())
-      }
-      subjectGroups.get(assignment.subjectCode)?.add(assignment.groupCode)
-    })
-    studentAssignments.set(student.id, assignments)
-  })
-
-  // Step 1: Detect overfull groups
-  const overfullGroups: Array<{ key: string; subject: string; group: string; block: string; count: number }> = []
-  groupEnrollment.forEach((count, key) => {
-    if (count > GROUP_CAPACITY) {
-      const [subject, group, block] = key.split('|')
-      overfullGroups.push({ key, subject, group, block, count })
-    }
-  })
-
-  if (overfullGroups.length === 0) {
-    return {
-      changes,
-      metrics: { moved: 0, swaps: 0, totalChanges: 0 },
-    }
-  }
-
-  // Step 2: Try to move students from overfull groups
-  const tryMoveStudents = (overfullSubject: string, overfullGroup: string, overfullBlock: string): boolean => {
-    const overfullKey = `${overfullSubject}|${overfullGroup}|${overfullBlock}`
-    let moved = false
-
-    // Find students in the overfull group
-    const studentsInOverfull: string[] = []
-    students.forEach((student) => {
-      const assignments = studentAssignments.get(student.id)
-      if (assignments?.get(overfullSubject) === overfullGroup) {
-        // Also check they're in the right block
-        const hasInBlock = student.assignments.some(
-          (a) => a.subjectCode === overfullSubject && a.groupCode === overfullGroup && a.block === overfullBlock
-        )
-        if (hasInBlock) {
-          studentsInOverfull.push(student.id)
-        }
-      }
-    })
-
-    // Try to move students to other available groups for this subject
-    for (const studentId of studentsInOverfull) {
-      if (moved) break
-
-      const student = students.find((s) => s.id === studentId)
-      if (!student) continue
-
-      const studentAssignment = studentAssignments.get(studentId)
-      if (!studentAssignment) continue
-
-      // Find other groups for this subject
-      const availableGroups = subjectGroups.get(overfullSubject) || new Set()
-      
-      for (const targetGroup of availableGroups) {
-        if (targetGroup === overfullGroup) continue
-
-        // Check if this group has capacity
-        // Try to find a target group in a different block
-        const targetGroupMatches = student.assignments.filter((a) => a.subjectCode === overfullSubject && a.groupCode === targetGroup)
-        
-        if (targetGroupMatches.length > 0) {
-          const targetBlock = targetGroupMatches[0].block
-          const targetKey = `${overfullSubject}|${targetGroup}|${targetBlock}`
-          const targetCount = groupEnrollment.get(targetKey) || 0
-
-          if (targetCount < GROUP_CAPACITY) {
-            // Move the student
-            groupEnrollment.set(overfullKey, (groupEnrollment.get(overfullKey) || 0) - 1)
-            groupEnrollment.set(targetKey, targetCount + 1)
-
-            studentAssignment.set(overfullSubject, targetGroup)
-            studentAssignments.set(studentId, studentAssignment)
-
-            changes.push({
-              studentId,
-              studentName: student.fullName,
-              subjectCode: overfullSubject,
-              subjectName: student.assignments.find((a) => a.subjectCode === overfullSubject)?.subjectName || overfullSubject,
-              fromTimeslot: overfullGroup,
-              toTimeslot: targetGroup,
-              reason: `Omfordeling fra ${overfullGroup} til ${targetGroup}`,
-            })
-
-            moved = true
-            break
-          }
-        }
-      }
-    }
-
-    return moved
-  }
-
-  // Iteratively try to resolve overfull groups
-  let iterationLimit = 5
-  while (iterationLimit-- > 0) {
-    let madeProgress = false
-
-    const currentOverfull = Array.from(groupEnrollment.entries())
-      .filter(([_, count]) => count > GROUP_CAPACITY)
-      .map(([key]) => {
-        const [subject, group, block] = key.split('|')
-        return { subject, group, block }
-      })
-
-    if (currentOverfull.length === 0) break
-
-    for (const { subject, group, block } of currentOverfull) {
-      if (tryMoveStudents(subject, group, block)) {
-        madeProgress = true
-        break
-      }
-    }
-
-    if (!madeProgress) break
-  }
-
-  const movedStudents = new Set(changes.map((c) => c.studentId))
-  return {
-    changes,
-    metrics: {
-      moved: movedStudents.size,
-      swaps: 0,
-      totalChanges: changes.length,
-    },
-  }
-}
 
 function balanceGroups(students: StudentRecord[], debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void): { changes: BalanceChange[]; overcrowdedCount: number } {
   const changes: BalanceChange[] = []
@@ -761,7 +871,7 @@ function balanceGroups(students: StudentRecord[], debugCallback?: (groups: Array
       const blockSet = new Set(blocks)
       for (const [otherKey, occupants] of groupOccupancy.entries()) {
         const [otherSubject, otherGroupCode, otherBlock] = otherKey.split('|')
-        if (otherSubject === subjectCode && !blockSet.has(otherBlock) && occupants.length < maxCap) {
+        if (otherSubject === subjectCode && !blockSet.has(otherBlock) && occupants.length < maxCap && canStudentMoveToBlock(student, otherBlock)) {
           changes.push({
             studentId,
             studentName: student.fullName,
@@ -834,6 +944,11 @@ function balanceGroups(students: StudentRecord[], debugCallback?: (groups: Array
         const toBlockIdx = cycle[(i + 1) % cycle.length]
         const fromBlock = blocks[fromBlockIdx]
         const toBlock = blocks[toBlockIdx]
+
+        if (!canStudentMoveToBlock(student, toBlock)) {
+          isValid = false
+          break
+        }
 
         const assignments = blockAssignments.get(fromBlock) || []
         if (assignments.length === 0) {
@@ -954,27 +1069,36 @@ function balanceGroups(students: StudentRecord[], debugCallback?: (groups: Array
 }
 
 function applyBalanceChanges(students: StudentRecord[], changes: BalanceChange[]): StudentRecord[] {
-  // Create a deep copy of students with modified assignments
+  // Apply each student's changes in order so chained moves land on the final destination.
   return students.map((student) => {
     const studentChanges = changes.filter((c) => c.studentId === student.id)
     if (studentChanges.length === 0) {
       return student
     }
 
-    // Apply each change to this student's assignments
-    const updatedAssignments = student.assignments.map((assignment) => {
-      const change = studentChanges.find(
-        (c) => c.subjectCode === assignment.subjectCode && c.fromGroupCode === assignment.groupCode && c.fromBlock === assignment.block
-      )
-      if (change) {
-        // Move this assignment to the new group and block
-        return {
-          ...assignment,
-          groupCode: change.toGroupCode,
-          block: change.toBlock,
-        }
+    const updatedAssignments = student.assignments.map((assignment) => ({ ...assignment }))
+
+    studentChanges.forEach((change) => {
+      if (!canStudentMoveToBlock(student, change.toBlock)) {
+        return
       }
-      return assignment
+
+      const assignmentIndex = updatedAssignments.findIndex(
+        (assignment) =>
+          assignment.subjectCode === change.subjectCode &&
+          assignment.groupCode === change.fromGroupCode &&
+          assignment.block === change.fromBlock,
+      )
+
+      if (assignmentIndex === -1) {
+        return
+      }
+
+      updatedAssignments[assignmentIndex] = {
+        ...updatedAssignments[assignmentIndex],
+        groupCode: change.toGroupCode,
+        block: change.toBlock,
+      }
     })
 
     return {
@@ -1753,6 +1877,12 @@ function App() {
   const [showBlockCollisions, setShowBlockCollisions] = useState<boolean>(persistedUiState.showBlockCollisions)
   const [showDuplicateSubjects, setShowDuplicateSubjects] = useState<boolean>(persistedUiState.showDuplicateSubjects)
   const [balanceResults, setBalanceResults] = useState<BalanceChange[] | null>(null)
+  const [balanceHistory, setBalanceHistory] = useState<BalanceResultRun[]>(() => {
+    const stored = loadFromLocalStorage<BalanceResultRun[]>(STORAGE_KEYS.balanceHistory, [])
+    return Array.isArray(stored)
+      ? stored.filter((run) => run && Array.isArray(run.changes) && typeof run.createdAt === 'string')
+      : []
+  })
   const [balanceMessage, setBalanceMessage] = useState<string>('')
   const [debugGroups, setDebugGroups] = useState<Array<{ key: string; count: number; maxCap: number; status: string }>>([])
   const [balanceDeltaCounts, setBalanceDeltaCounts] = useState<Map<string, number>>(new Map())
@@ -1771,11 +1901,12 @@ function App() {
   const [pendingRemovalAssignment, setPendingRemovalAssignment] = useState<string>('')
   const [showProgressiveBalanceDialog, setShowProgressiveBalanceDialog] = useState<boolean>(false)
   const [progressiveBalanceMaxOffset, setProgressiveBalanceMaxOffset] = useState<number>(-4)
-  const [showAdvancedBalanceDialog, setShowAdvancedBalanceDialog] = useState<boolean>(false)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const clearStoredData = (): void => {
     removeFromLocalStorage(STORAGE_KEYS.parsedData)
     removeFromLocalStorage(STORAGE_KEYS.uiState)
+    removeFromLocalStorage(STORAGE_KEYS.balanceHistory)
 
     setParsedData(null)
     setSelectedStudentId('')
@@ -1790,6 +1921,7 @@ function App() {
     setShowBlockCollisions(false)
     setShowDuplicateSubjects(false)
     setBalanceResults(null)
+    setBalanceHistory([])
     setBalanceMessage('')
     setDebugGroups([])
     setBalanceDeltaCounts(new Map())
@@ -1806,11 +1938,20 @@ function App() {
     setStudentAddSubjectCode('')
     setStudentAddSubjectBlock('')
     setPendingRemovalAssignment('')
+
+    // Allow selecting the same file again after clearing data.
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''
+    }
   }
 
   useEffect(() => {
     saveToLocalStorage(STORAGE_KEYS.parsedData, parsedData)
   }, [parsedData])
+
+  useEffect(() => {
+    saveToLocalStorage(STORAGE_KEYS.balanceHistory, balanceHistory)
+  }, [balanceHistory])
 
   useEffect(() => {
     const stateToPersist: PersistedUiState = {
@@ -2075,6 +2216,122 @@ function App() {
     return groupMemberLookup.get(selectedGroupKey) || []
   }, [groupMemberLookup, selectedGroupKey])
 
+  const summarizedBalanceResults = useMemo(() => {
+    if (!balanceResults) {
+      return [] as BalanceChange[]
+    }
+
+    return summarizeBalanceChanges(balanceResults)
+  }, [balanceResults])
+
+  const balanceHistoryByStudent = useMemo(() => {
+    const grouped = new Map<string, { studentId: string; studentName: string; classGroup: string; runs: Array<{ runId: string; createdAt: string; message: string; changes: BalanceChange[] }> }>()
+    const studentClassById = new Map<string, string>()
+    ;(parsedData?.students || []).forEach((student) => {
+      studentClassById.set(student.id, student.classGroup || '')
+    })
+
+    balanceHistory.forEach((run) => {
+      const summarized = summarizeBalanceChanges(run.changes)
+      if (summarized.length === 0) {
+        return
+      }
+
+      const byStudent = new Map<string, BalanceChange[]>()
+      summarized.forEach((change) => {
+        if (!byStudent.has(change.studentId)) {
+          byStudent.set(change.studentId, [])
+        }
+        byStudent.get(change.studentId)?.push(change)
+      })
+
+      byStudent.forEach((studentChanges, studentId) => {
+        const studentName = studentChanges[0]?.studentName || `Student ${studentId}`
+        const classGroup = studentClassById.get(studentId) || ''
+        if (!grouped.has(studentId)) {
+          grouped.set(studentId, { studentId, studentName, classGroup, runs: [] })
+        }
+
+        grouped.get(studentId)?.runs.push({
+          runId: run.id,
+          createdAt: run.createdAt,
+          message: run.message,
+          changes: [...studentChanges].sort((a, b) => {
+            const subjectNameCmp = (a.subjectName || a.subjectCode).localeCompare(b.subjectName || b.subjectCode)
+            if (subjectNameCmp !== 0) {
+              return subjectNameCmp
+            }
+            return a.subjectCode.localeCompare(b.subjectCode)
+          }),
+        })
+      })
+    })
+
+    return Array.from(grouped.values()).sort((a, b) => a.studentName.localeCompare(b.studentName, 'nb-NO'))
+  }, [balanceHistory, parsedData])
+
+  const appendBalanceHistoryRun = (changes: BalanceChange[], message: string): void => {
+    const summarized = summarizeBalanceChanges(changes)
+    if (summarized.length === 0) {
+      return
+    }
+
+    const run: BalanceResultRun = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      createdAt: new Date().toISOString(),
+      message,
+      changes: summarized,
+    }
+
+    setBalanceHistory((previous) => [...previous, run])
+  }
+
+  const handleExportBalanceResultsWord = (): void => {
+    if (balanceHistoryByStudent.length === 0) {
+      setErrorMessage('Ingen balanseringsresultater a eksportere enda.')
+      return
+    }
+
+    const now = new Date()
+    const timestampForFile = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
+    const fileName = `balanseringsresultater-${timestampForFile}.doc`
+
+    const bodyRows = balanceHistoryByStudent
+      .map((student) => {
+        const runHtml = student.runs
+          .map((run) => {
+            const lines = run.changes
+              .map((change) => {
+                const subjectName = escapeHtml(change.subjectName || change.subjectCode)
+                const fromBlock = escapeHtml(change.fromBlock)
+                const fromGroup = escapeHtml(change.fromGroupCode)
+                const toBlock = escapeHtml(change.toBlock)
+                const toGroup = escapeHtml(change.toGroupCode)
+                return `<li><strong>${subjectName}</strong>: ${fromBlock} (${fromGroup}) -> ${toBlock} (${toGroup})</li>`
+              })
+              .join('')
+            return `<div class="run"><div class="run-head"><span>${escapeHtml(formatTimestamp(run.createdAt))}</span></div><ul>${lines}</ul></div>`
+          })
+          .join('')
+
+        return `<section class="student"><h3>${escapeHtml(student.studentName)} (${escapeHtml(student.studentId)})</h3>${runHtml}</section>`
+      })
+      .join('')
+
+    const htmlDocument = `<!doctype html><html><head><meta charset="utf-8"><title>Balanseringsresultater</title><style>body{font-family:Calibri,Arial,sans-serif;font-size:11pt;color:#1f2b3d;margin:24px;}h1{font-size:18pt;margin:0 0 12px;}h3{font-size:12pt;margin:14px 0 8px;padding-bottom:4px;border-bottom:1px solid #d9e3f0;}.student{margin-bottom:14px;}.run{padding:6px 0;border-top:1px solid #e7edf6;}.run:first-of-type{border-top:none;}.run-head{display:flex;justify-content:space-between;font-size:9pt;color:#506480;margin-bottom:3px;}ul{margin:0;padding-left:18px;}li{margin:2px 0;}</style></head><body><h1>Balanseringsresultater</h1>${bodyRows}</body></html>`
+
+    const blob = new Blob(['\ufeff', htmlDocument], { type: 'application/msword;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = fileName
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+    setErrorMessage('')
+  }
+
   const handleExport = (): void => {
     if (!parsedData || !isParsedDataExportReady(parsedData)) {
       setErrorMessage('Ingen gyldig eksportkilde er lastet. Last opp filen pa nytt for eksport.')
@@ -2125,6 +2382,9 @@ function App() {
       setSelectedStudentId('')
       setSelectedGroupKey('')
       setErrorMessage('Kunne ikke lese eksportfilen. Bekreft at filen er en Novaschem TXT-eksport.')
+    } finally {
+      // Reset input so choosing the same file again triggers onChange.
+      event.target.value = ''
     }
   }
 
@@ -2142,7 +2402,7 @@ function App() {
         <label htmlFor="novaschem-file" className="file-label">
           Velg Novaschem TXT-fil
         </label>
-        <input id="novaschem-file" type="file" accept=".txt" onChange={handleFileUpload} />
+        <input id="novaschem-file" ref={fileInputRef} type="file" accept=".txt" onChange={handleFileUpload} />
         <div className="storage-controls">
           <button type="button" onClick={clearStoredData} className="storage-button danger">
             Tøm lagret data
@@ -2487,14 +2747,17 @@ function App() {
                     setBalanceDeltaCounts(deltas)
                     setBalanceBlockDeltaCounts(blockDeltas)
                     
+                    let nextBalanceMessage = ''
                     if (result.overcrowdedCount === 0) {
-                      setBalanceMessage('✓ Ingen overfulle grupper. Alle grupper er innenfor kapasitet.')
+                      nextBalanceMessage = '✓ Ingen overfulle grupper. Alle grupper er innenfor kapasitet.'
                     } else if (result.changes.length === 0) {
-                      setBalanceMessage(`Fant ${result.overcrowdedCount} overfull(e) gruppe(r), men ingen elever kan flyttes (alle elever har unike blokktildelinger i disse fagene).`)
+                      nextBalanceMessage = `Fant ${result.overcrowdedCount} overfull(e) gruppe(r), men ingen elever kan flyttes (alle elever har unike blokktildelinger i disse fagene).`
                     } else {
                       const uniqueStudents = new Set(result.changes.map((c) => c.studentId))
-                      setBalanceMessage(`Fant ${result.overcrowdedCount} overfull(e) gruppe(r). Flyttet ${uniqueStudents.size} elev(er) (${result.changes.length} fagendringer).`)
+                      nextBalanceMessage = `Fant ${result.overcrowdedCount} overfull(e) gruppe(r). Flyttet ${uniqueStudents.size} elev(er) (${result.changes.length} fagendringer).`
+                      appendBalanceHistoryRun(result.changes, nextBalanceMessage)
                     }
+                    setBalanceMessage(nextBalanceMessage)
                     }}
                     className="balance-button"
                   >
@@ -2507,51 +2770,46 @@ function App() {
                   >
                     Progressiv balansering
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowAdvancedBalanceDialog(true)}
-                    className="balance-button"
-                  >
-                    Avansert balansering
-                  </button>
                 </div>
               </div>
 
-              {balanceResults !== null && (
+              {(balanceResults !== null || balanceHistoryByStudent.length > 0) && (
                 <div className="balance-results">
                   <h3>
                     Balanseringsresultater{' '}
-                    {balanceResults.length > 0
-                      ? `(${new Set(balanceResults.map((c) => c.studentId)).size} elev${new Set(balanceResults.map((c) => c.studentId)).size === 1 ? '' : 'er'}, ${balanceResults.length} fagendringer)`
+                    {balanceHistoryByStudent.length > 0
+                      ? `(${balanceHistoryByStudent.length} elev${balanceHistoryByStudent.length === 1 ? '' : 'er'} med historikk)`
                       : ''}
                   </h3>
                   {balanceMessage && <p className="balance-message">{balanceMessage}</p>}
-                  {balanceResults.length > 0 && (
+                  {balanceHistoryByStudent.length > 0 && (
                     <div className="balance-list">
-                      {(() => {
-                        const groupedByStudent = new Map<string, BalanceChange[]>()
-                        balanceResults.forEach((change) => {
-                          if (!groupedByStudent.has(change.studentId)) {
-                            groupedByStudent.set(change.studentId, [])
-                          }
-                          groupedByStudent.get(change.studentId)?.push(change)
-                        })
-
-                        return Array.from(groupedByStudent.values()).map((changes) => (
-                          <div key={changes[0].studentId} className="balance-item">
-                            <strong>{changes[0].studentName}</strong> ({changes[0].studentId})
-                            <br />
-                            {changes.map((change, i) => (
-                              <div key={i} style={{ marginLeft: '1rem', marginTop: '0.3rem', fontSize: '0.95rem' }}>
-                                <strong>{change.subjectCode}</strong> ({change.subjectName}): Gruppe {change.fromGroupCode}, {change.fromBlock} → Gruppe {change.toGroupCode}, {change.toBlock}
+                      {balanceHistoryByStudent.map((student) => (
+                        <div key={student.studentId} className="balance-item">
+                          <strong>{student.studentName}</strong> ({student.classGroup || '-'}) ({student.studentId})
+                          {student.runs.map((run) => (
+                            <div key={run.runId} className="balance-run-segment">
+                              <div className="balance-run-meta">
+                                <span>{run.message || 'Balansering'}</span>
+                                <span>{formatTimestamp(run.createdAt)}</span>
                               </div>
-                            ))}
-                          </div>
-                        ))
-                      })()}
+                              {run.changes.map((change) => (
+                                <div key={`${run.runId}-${change.subjectCode}-${change.fromGroupCode}-${change.toGroupCode}-${change.fromBlock}-${change.toBlock}`} className="balance-change-line balance-change-moved">
+                                  <strong>{change.subjectName || change.subjectCode}</strong>: {change.fromBlock} ({change.fromGroupCode}) &rarr; {change.toBlock} ({change.toGroupCode})
+                                </div>
+                              ))}
+                            </div>
+                          ))}
+                        </div>
+                      ))}
                     </div>
                   )}
-                  {balanceResults.length === 0 && debugGroups.length > 0 && (
+                  {balanceResults !== null && balanceResults.length > 0 && summarizedBalanceResults.length === 0 && (
+                    <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '0.8rem' }}>
+                      Ingen netto fagendringer etter oppsummering av mellomsteg.
+                    </p>
+                  )}
+                  {balanceResults !== null && balanceResults.length === 0 && debugGroups.length > 0 && (
                     <>
                       <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '0.8rem' }}>
                         Alle grupper analysert ({debugGroups.length} grupper):
@@ -2573,8 +2831,17 @@ function App() {
                   )}
                   <button
                     type="button"
+                    onClick={handleExportBalanceResultsWord}
+                    className="clear-results-button"
+                    disabled={balanceHistoryByStudent.length === 0}
+                  >
+                    Eksporter resultat til Word
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => {
                       setBalanceResults(null)
+                      setBalanceHistory([])
                       setBalanceMessage('')
                       setDebugGroups([])
                       setBalanceDeltaCounts(new Map())
@@ -3146,6 +3413,7 @@ function App() {
                             setBalanceBlockDeltaCounts(blockDeltas)
                             
                             setBalanceMessage(result.summary)
+                            appendBalanceHistoryRun(result.allChanges, result.summary)
                             setShowProgressiveBalanceDialog(false)
                           }}
                           className="balance-button"
@@ -3165,66 +3433,7 @@ function App() {
                 </div>
               )}
 
-              {showAdvancedBalanceDialog && (
-                <div className="modal-overlay" onClick={() => setShowAdvancedBalanceDialog(false)}>
-                  <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-                    <h3>Avansert balansering</h3>
-                    <p>Balanser elevtildelinger på tvers av timeslots ved hjelp av constraint satisfaction.
-                    </p>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '1rem' }}>
-                      <p style={{ fontSize: '0.9rem', color: '#333' }}>
-                        Denne algoritmen vil:
-                      </p>
-                      <ul style={{ fontSize: '0.85rem', margin: '0 0 0 1.5rem' }}>
-                        <li>Oppdage overfulle timeslot-faggrupper</li>
-                        <li>Prøve intern omfordeling innen samme fag</li>
-                        <li>Utføre elevbytter når relevant</li>
-                        <li>Minimere antall elevbe bevegelser</li>
-                      </ul>
 
-                      <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (!parsedData) return
-
-                            const result = advancedBalanceAlgorithm(parsedData.students)
-                            
-                            setBalanceMessage(
-                              `Avansert balansering fullført: ${result.metrics.moved} elev(er) flyttet (${result.metrics.totalChanges} fagendringer, ${result.metrics.swaps} bytter)`
-                            )
-                            
-                            // Show results - map to BalanceChange format for display
-                            const displayChanges: BalanceChange[] = result.changes.map((c) => ({
-                              studentId: c.studentId,
-                              studentName: c.studentName,
-                              subjectCode: c.subjectCode,
-                              subjectName: c.subjectName,
-                              fromGroupCode: c.fromTimeslot, // Contains actual group code
-                              fromBlock: 'Gruppe', // Label for display
-                              toGroupCode: c.toTimeslot, // Contains actual group code
-                              toBlock: 'Gruppe', // Label for display
-                            }))
-                            
-                            setBalanceResults(displayChanges)
-                            setShowAdvancedBalanceDialog(false)
-                          }}
-                          className="balance-button"
-                        >
-                          Kjør avansert balansering
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setShowAdvancedBalanceDialog(false)}
-                          className="clear-results-button"
-                        >
-                          Avbryt
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
 
               <h2>Per fag (alle grupper)</h2>
               <table>
