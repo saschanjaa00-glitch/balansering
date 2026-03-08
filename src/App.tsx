@@ -91,6 +91,16 @@ type BalanceChange = {
   toBlock: string
 }
 
+type AdvancedBalanceChange = {
+  studentId: string
+  studentName: string
+  subjectCode: string
+  subjectName: string
+  fromTimeslot: string
+  toTimeslot: string
+  reason: string
+}
+
 const SUFFIX_BLOCKS: Record<string, string> = {
   A: 'Blokk 1',
   B: 'Blokk 2',
@@ -528,6 +538,219 @@ function progressiveBalanceGroups(
   const summary = `Progressiv balansering fullført: ${uniqueStudents.size} elev(er) flyttet (${allChanges.length} fagendringer)`
 
   return { allChanges, summary }
+}
+
+// Advanced timeslot-based balancing algorithm
+function advancedBalanceAlgorithm(
+  students: StudentRecord[]
+): { changes: AdvancedBalanceChange[]; metrics: { moved: number; swaps: number; totalChanges: number } } {
+  const changes: AdvancedBalanceChange[] = []
+  const TIMESLOT_CAPACITY = 30
+  const TIMESLOTS = ['A', 'B', 'C']
+
+  // Build current assignments: {studentId -> {subjectCode -> timeslot}}
+  const studentAssignments = new Map<string, Map<string, string>>()
+  const timeslotEnrollment = new Map<string, Map<string, number>>() // {timeslot -> {subjectCode -> count}}
+
+  students.forEach((student) => {
+    const assignments = new Map<string, string>()
+    student.assignments.forEach((assignment) => {
+      const timeslot = assignment.block.match(/\d+/)?.[0] // Extract block number as timeslot proxy
+      if (timeslot) {
+        assignments.set(assignment.subjectCode, timeslot)
+      }
+    })
+    studentAssignments.set(student.id, assignments)
+  })
+
+  // Calculate enrollment per (timeslot, subject)
+  TIMESLOTS.forEach((slot) => {
+    timeslotEnrollment.set(slot, new Map())
+  })
+
+  students.forEach((student) => {
+    const assignments = studentAssignments.get(student.id) || new Map()
+    assignments.forEach((timeslot, subjectCode) => {
+      const slotMap = timeslotEnrollment.get(timeslot) || new Map()
+      slotMap.set(subjectCode, (slotMap.get(subjectCode) || 0) + 1)
+      timeslotEnrollment.set(timeslot, slotMap)
+    })
+  })
+
+  // Step 1: Detect overfull classes
+  const overfull: Array<{ timeslot: string; subjectCode: string; count: number }> = []
+  timeslotEnrollment.forEach((slotMap, timeslot) => {
+    slotMap.forEach((count, subjectCode) => {
+      if (count > TIMESLOT_CAPACITY) {
+        overfull.push({ timeslot, subjectCode, count })
+      }
+    })
+  })
+
+  if (overfull.length === 0) {
+    return {
+      changes,
+      metrics: { moved: 0, swaps: 0, totalChanges: 0 },
+    }
+  }
+
+  // Step 2: Internal swaps (move students within same subject to different timeslots)
+  const processedStudents = new Set<string>()
+
+  const tryInternalSwap = (overfullSubject: string, overfullSlot: string): boolean => {
+    let anyMoves = false
+
+    // Find students in overfull subject+slot who could move elsewhere
+    const studentsInOverfull: string[] = []
+    students.forEach((student) => {
+      if (processedStudents.has(student.id)) return
+      const assignments = studentAssignments.get(student.id)
+      if (assignments?.get(overfullSubject) === overfullSlot) {
+        studentsInOverfull.push(student.id)
+      }
+    })
+
+    for (const studentId of studentsInOverfull) {
+      if (anyMoves) break
+
+      const student = students.find((s) => s.id === studentId)
+      if (!student) continue
+
+      const assignments = studentAssignments.get(studentId) || new Map()
+      const usedSlots = new Set(assignments.values())
+
+      // Try to move to another timeslot for this subject
+      for (const targetSlot of TIMESLOTS) {
+        if (targetSlot === overfullSlot || usedSlots.has(targetSlot)) continue
+
+        const targetCount = (timeslotEnrollment.get(targetSlot)?.get(overfullSubject) || 0) + 1
+        if (targetCount <= TIMESLOT_CAPACITY) {
+          // Make the move
+          timeslotEnrollment.get(overfullSlot)?.set(overfullSubject, (timeslotEnrollment.get(overfullSlot)?.get(overfullSubject) || 0) - 1)
+          timeslotEnrollment.get(targetSlot)?.set(overfullSubject, targetCount)
+
+          assignments.set(overfullSubject, targetSlot)
+          studentAssignments.set(studentId, assignments)
+
+          changes.push({
+            studentId,
+            studentName: student.fullName,
+            subjectCode: overfullSubject,
+            subjectName: student.assignments.find((a) => a.subjectCode === overfullSubject)?.subjectName || overfullSubject,
+            fromTimeslot: overfullSlot,
+            toTimeslot: targetSlot,
+            reason: 'Intern omfordeling innen fag',
+          })
+
+          anyMoves = true
+          break
+        }
+      }
+    }
+
+    return anyMoves
+  }
+
+  // Step 3 & 4: Student swaps and chain swaps using local search
+  const tryStudentSwaps = (): boolean => {
+    let improved = false
+
+    for (const [studentAId, assignmentsA] of studentAssignments) {
+      if (processedStudents.has(studentAId)) continue
+
+      const studentA = students.find((s) => s.id === studentAId)
+      if (!studentA) continue
+
+      for (const [studentBId, assignmentsB] of studentAssignments) {
+        if (studentBId <= studentAId || processedStudents.has(studentBId)) continue
+
+        const studentB = students.find((s) => s.id === studentBId)
+        if (!studentB) continue
+
+        // Try simple 2-swap: see if swapping one subject between A and B helps
+        for (const subjectA of assignmentsA.keys()) {
+          for (const subjectB of assignmentsB.keys()) {
+            const slotA = assignmentsA.get(subjectA)
+            const slotB = assignmentsB.get(subjectB)
+
+            if (!slotA || !slotB) continue
+
+            // Check if swap would reduce overfull
+            const countAA = timeslotEnrollment.get(slotA)?.get(subjectA) || 0
+            const countBB = timeslotEnrollment.get(slotB)?.get(subjectB) || 0
+            const countAB = (timeslotEnrollment.get(slotB)?.get(subjectA) || 0) + 1
+            const countBA = (timeslotEnrollment.get(slotA)?.get(subjectB) || 0) + 1
+
+            if (countAB <= TIMESLOT_CAPACITY && countBA <= TIMESLOT_CAPACITY && (countAA > TIMESLOT_CAPACITY || countBB > TIMESLOT_CAPACITY)) {
+              // Perform swap
+              assignmentsA.set(subjectA, slotB)
+              assignmentsB.set(subjectB, slotA)
+
+              timeslotEnrollment.get(slotA)?.set(subjectA, countAA - 1)
+              timeslotEnrollment.get(slotA)?.set(subjectB, countBA)
+              timeslotEnrollment.get(slotB)?.set(subjectA, countAB)
+              timeslotEnrollment.get(slotB)?.set(subjectB, countBB - 1)
+
+              changes.push({
+                studentId: studentAId,
+                studentName: studentA.fullName,
+                subjectCode: subjectA,
+                subjectName: studentA.assignments.find((a) => a.subjectCode === subjectA)?.subjectName || subjectA,
+                fromTimeslot: slotA,
+                toTimeslot: slotB,
+                reason: 'Elevbytte',
+              })
+
+              changes.push({
+                studentId: studentBId,
+                studentName: studentB.fullName,
+                subjectCode: subjectB,
+                subjectName: studentB.assignments.find((a) => a.subjectCode === subjectB)?.subjectName || subjectB,
+                fromTimeslot: slotB,
+                toTimeslot: slotA,
+                reason: 'Elevbytte',
+              })
+
+              improved = true
+              return improved
+            }
+          }
+        }
+      }
+    }
+
+    return improved
+  }
+
+  // Iteratively apply improvements
+  let iterationLimit = 10
+  while (iterationLimit-- > 0) {
+    let madeProgress = false
+
+    // Try internal swaps for each overfull
+    for (const { timeslot, subjectCode } of overfull) {
+      if (tryInternalSwap(subjectCode, timeslot)) {
+        madeProgress = true
+      }
+    }
+
+    // Try student swaps
+    if (tryStudentSwaps()) {
+      madeProgress = true
+    }
+
+    if (!madeProgress) break
+  }
+
+  const movedStudents = new Set(changes.map((c) => c.studentId))
+  return {
+    changes,
+    metrics: {
+      moved: movedStudents.size,
+      swaps: Math.floor(changes.length / 2),
+      totalChanges: changes.length,
+    },
+  }
 }
 
 function balanceGroups(students: StudentRecord[], debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void): { changes: BalanceChange[]; overcrowdedCount: number } {
@@ -1606,6 +1829,7 @@ function App() {
   const [pendingRemovalAssignment, setPendingRemovalAssignment] = useState<string>('')
   const [showProgressiveBalanceDialog, setShowProgressiveBalanceDialog] = useState<boolean>(false)
   const [progressiveBalanceMaxOffset, setProgressiveBalanceMaxOffset] = useState<number>(-4)
+  const [showAdvancedBalanceDialog, setShowAdvancedBalanceDialog] = useState<boolean>(false)
 
   const clearStoredData = (): void => {
     removeFromLocalStorage(STORAGE_KEYS.parsedData)
@@ -2341,6 +2565,13 @@ function App() {
                   >
                     Progressiv balansering
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowAdvancedBalanceDialog(true)}
+                    className="balance-button"
+                  >
+                    Avansert balansering
+                  </button>
                 </div>
               </div>
 
@@ -2982,6 +3213,67 @@ function App() {
                         <button
                           type="button"
                           onClick={() => setShowProgressiveBalanceDialog(false)}
+                          className="clear-results-button"
+                        >
+                          Avbryt
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {showAdvancedBalanceDialog && (
+                <div className="modal-overlay" onClick={() => setShowAdvancedBalanceDialog(false)}>
+                  <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+                    <h3>Avansert balansering</h3>
+                    <p>Balanser elevtildelinger på tvers av timeslots ved hjelp av constraint satisfaction.
+                    </p>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '1rem' }}>
+                      <p style={{ fontSize: '0.9rem', color: '#333' }}>
+                        Denne algoritmen vil:
+                      </p>
+                      <ul style={{ fontSize: '0.85rem', margin: '0 0 0 1.5rem' }}>
+                        <li>Oppdage overfulle timeslot-faggrupper</li>
+                        <li>Prøve intern omfordeling innen samme fag</li>
+                        <li>Utføre elevbytter når relevant</li>
+                        <li>Minimere antall elevbe bevegelser</li>
+                      </ul>
+
+                      <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!parsedData) return
+
+                            const result = advancedBalanceAlgorithm(parsedData.students)
+                            
+                            setBalanceMessage(
+                              `Avansert balansering fullført: ${result.metrics.moved} elev(er) flyttet (${result.metrics.totalChanges} fagendringer, ${result.metrics.swaps} bytter)`
+                            )
+                            
+                            // Show results - map to BalanceChange format for display
+                            const displayChanges: BalanceChange[] = result.changes.map((c) => ({
+                              studentId: c.studentId,
+                              studentName: c.studentName,
+                              subjectCode: c.subjectCode,
+                              subjectName: c.subjectName,
+                              fromGroupCode: c.fromTimeslot,
+                              fromBlock: `Slot ${c.fromTimeslot}`,
+                              toGroupCode: c.toTimeslot,
+                              toBlock: `Slot ${c.toTimeslot}`,
+                            }))
+                            
+                            setBalanceResults(displayChanges)
+                            setShowAdvancedBalanceDialog(false)
+                          }}
+                          className="balance-button"
+                        >
+                          Kjør avansert balansering
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowAdvancedBalanceDialog(false)}
                           className="clear-results-button"
                         >
                           Avbryt
