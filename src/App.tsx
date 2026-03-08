@@ -127,14 +127,14 @@ function balanceGroups(students: StudentRecord[], debugCallback?: (groups: Array
     const [subjectCode] = key.split('|')
     const subjectName = students
       .flatMap((s) => s.assignments)
-      .find((a) => a.subjectCode === subjectCode)?.subjectName || 'UNKNOWN'
+      .find((a) => a.subjectCode === subjectCode)?.subjectName || 'UKJENT'
 
     const maxCap = getMaxCapacityForSubject(subjectName)
-    const status = studentIds.length > maxCap ? `OVERCROWDED (${studentIds.length} > ${maxCap})` : `OK (${studentIds.length} ≤ ${maxCap})`
+    const status = studentIds.length > maxCap ? `OVERFULL (${studentIds.length} > ${maxCap})` : `OK (${studentIds.length} ≤ ${maxCap})`
     
     debugGroups.push({ key, count: studentIds.length, maxCap, status })
 
-    if (subjectName !== 'UNKNOWN' && studentIds.length > maxCap) {
+    if (subjectName !== 'UKJENT' && studentIds.length > maxCap) {
       overcrowded.push({ key, count: studentIds.length, studentIds })
     }
   })
@@ -1116,23 +1116,23 @@ function App() {
       setParsedData(null)
       setSelectedStudentId('')
       setSelectedGroupKey('')
-      setErrorMessage('Could not parse the export file. Confirm that the file is a Novaschem TXT export.')
+      setErrorMessage('Kunne ikke lese eksportfilen. Bekreft at filen er en Novaschem TXT-eksport.')
     }
   }
 
   return (
     <div className="app-shell">
       <header className="hero">
-        <p className="hero-tag">Novaschem to SATS</p>
-        <h1>Timetable Export Viewer</h1>
+        <p className="hero-tag">Novaschem til SATS</p>
+        <h1>Novaschem Eksportvisning</h1>
         <p className="hero-subtitle">
-          Upload one Novaschem TXT export to browse students, their selected subjects, and assigned blocks.
+          Last opp en Novaschem TXT-eksport for å bla gjennom elever, deres valgte fag og tildelte blokker.
         </p>
       </header>
 
       <section className="upload-panel">
         <label htmlFor="novaschem-file" className="file-label">
-          Select Novaschem TXT File
+          Velg Novaschem TXT-fil
         </label>
         <input id="novaschem-file" type="file" accept=".txt" onChange={handleFileUpload} />
         {errorMessage && <p className="error-text">{errorMessage}</p>}
@@ -1140,19 +1140,19 @@ function App() {
           <div className="stats-grid">
             <article>
               <strong>{parsedData.students.length}</strong>
-              <span>Students</span>
+              <span>Elever</span>
             </article>
             <article>
               <strong>{parsedData.subjects.length}</strong>
-              <span>Subjects In Use</span>
+              <span>Fag i bruk</span>
             </article>
             <article>
               <strong>{parsedData.blocks.length}</strong>
-              <span>Blocks Found</span>
+              <span>Blokker funnet</span>
             </article>
             <article>
               <strong>{parsedData.tableNames.length}</strong>
-              <span>Tables Parsed</span>
+              <span>Tabeller lest</span>
             </article>
           </div>
         )}
@@ -1167,14 +1167,14 @@ function App() {
                 className={viewMode === 'students' ? 'active' : ''}
                 onClick={() => setViewMode('students')}
               >
-                Student View
+                Elevvisning
               </button>
               <button
                 type="button"
                 className={viewMode === 'subjects' ? 'active' : ''}
                 onClick={() => setViewMode('subjects')}
               >
-                Subject View
+                Fagvisning
               </button>
             </div>
 
@@ -1182,7 +1182,7 @@ function App() {
               type="search"
               value={subjectQuery}
               onChange={(event) => setSubjectQuery(event.target.value)}
-              placeholder="Filter by subject code or name"
+              placeholder="Filtrer etter fagkode eller navn"
             />
 
             <label className="blokkfag-checkbox">
@@ -1191,11 +1191,11 @@ function App() {
                 checked={onlyBlokkfag}
                 onChange={(event) => setOnlyBlokkfag(event.target.checked)}
               />
-              <span>Blokkfag only</span>
+              <span>Kun blokkfag</span>
             </label>
 
             <select value={blockFilter} onChange={(event) => setBlockFilter(event.target.value)}>
-              <option value="">All blocks</option>
+              <option value="">Alle blokker</option>
               {parsedData.blocks.map((block) => (
                 <option key={block} value={block}>
                   {block}
@@ -1211,7 +1211,7 @@ function App() {
                   type="search"
                   value={studentQuery}
                   onChange={(event) => setStudentQuery(event.target.value)}
-                  placeholder="Search student name or number"
+                  placeholder="Søk elevnavn eller nummer"
                 />
 
                 <button
@@ -1219,7 +1219,7 @@ function App() {
                   onClick={() => setShowIncompleteBlocks(!showIncompleteBlocks)}
                   className={`filter-button ${showIncompleteBlocks ? 'active' : ''}`}
                 >
-                  Show only missing 2+ blocks
+                  Vis kun mangler 2+ blokker
                 </button>
 
                 <div className="student-list">
@@ -1234,7 +1234,7 @@ function App() {
                         {student.fullName} {student.classGroup && `(${student.classGroup})`}
                       </span>
                       <small>
-                        {student.id} | {student.assignments.length} subjects
+                        {student.id} | {student.assignments.length} fag
                       </small>
                     </button>
                   ))}
@@ -1248,17 +1248,17 @@ function App() {
                       {selectedStudent.fullName} {selectedStudent.classGroup && `(${selectedStudent.classGroup})`}
                     </h2>
                     <p>
-                      Student number: <strong>{selectedStudent.id}</strong>
+                      Elevnummer: <strong>{selectedStudent.id}</strong>
                       {selectedStudent.email ? <> | {selectedStudent.email}</> : null}
                     </p>
 
                     <table>
                       <thead>
                         <tr>
-                          <th>Subject</th>
-                          <th>Title</th>
-                          <th>Group</th>
-                          <th>Block</th>
+                          <th>Fag</th>
+                          <th>Tittel</th>
+                          <th>Gruppe</th>
+                          <th>Blokk</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1277,14 +1277,14 @@ function App() {
                     </table>
                   </>
                 ) : (
-                  <p>Select a student to see subject choices.</p>
+                  <p>Velg en elev for å se fagvalg.</p>
                 )}
               </article>
             </section>
           ) : (
             <section className="subject-panel">
               <div className="subject-view-header">
-                <h2>Subject View</h2>
+                <h2>Fagvisning</h2>
                 <button
                   type="button"
                   onClick={() => {
@@ -1353,12 +1353,12 @@ function App() {
                     setBalanceBlockDeltaCounts(blockDeltas)
                     
                     if (result.overcrowdedCount === 0) {
-                      setBalanceMessage('✓ No overcrowded groups. All groups are within capacity.')
+                      setBalanceMessage('✓ Ingen overfulle grupper. Alle grupper er innenfor kapasitet.')
                     } else if (result.changes.length === 0) {
-                      setBalanceMessage(`Found ${result.overcrowdedCount} overcrowded group(s), but no students can be moved (all students have unique block assignments in those subjects).`)
+                      setBalanceMessage(`Fant ${result.overcrowdedCount} overfull(e) gruppe(r), men ingen elever kan flyttes (alle elever har unike blokktildelinger i disse fagene).`)
                     } else {
                       const uniqueStudents = new Set(result.changes.map((c) => c.studentId))
-                      setBalanceMessage(`Found ${result.overcrowdedCount} overcrowded group(s). Successfully moved ${uniqueStudents.size} student(s) (${result.changes.length} subject changes).`)
+                      setBalanceMessage(`Fant ${result.overcrowdedCount} overfull(e) gruppe(r). Flyttet ${uniqueStudents.size} elev(er) (${result.changes.length} fagendringer).`)
                     }
                   }}
                   className="balance-button"
@@ -1370,9 +1370,9 @@ function App() {
               {balanceResults !== null && (
                 <div className="balance-results">
                   <h3>
-                    Balance Results{' '}
+                    Balanseringsresultater{' '}
                     {balanceResults.length > 0
-                      ? `(${new Set(balanceResults.map((c) => c.studentId)).size} student${new Set(balanceResults.map((c) => c.studentId)).size === 1 ? '' : 's'}, ${balanceResults.length} subject changes)`
+                      ? `(${new Set(balanceResults.map((c) => c.studentId)).size} elev${new Set(balanceResults.map((c) => c.studentId)).size === 1 ? '' : 'er'}, ${balanceResults.length} fagendringer)`
                       : ''}
                   </h3>
                   {balanceMessage && <p className="balance-message">{balanceMessage}</p>}
@@ -1393,7 +1393,7 @@ function App() {
                             <br />
                             {changes.map((change, i) => (
                               <div key={i} style={{ marginLeft: '1rem', marginTop: '0.3rem', fontSize: '0.95rem' }}>
-                                <strong>{change.subjectCode}</strong> ({change.subjectName}): Group {change.fromGroupCode}, {change.fromBlock} → Group {change.toGroupCode}, {change.toBlock}
+                                <strong>{change.subjectCode}</strong> ({change.subjectName}): Gruppe {change.fromGroupCode}, {change.fromBlock} → Gruppe {change.toGroupCode}, {change.toBlock}
                               </div>
                             ))}
                           </div>
@@ -1404,16 +1404,16 @@ function App() {
                   {balanceResults.length === 0 && debugGroups.length > 0 && (
                     <>
                       <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '0.8rem' }}>
-                        All groups analyzed ({debugGroups.length} groups):
+                        Alle grupper analysert ({debugGroups.length} grupper):
                       </p>
                       <div className="balance-list" style={{ maxHeight: '400px' }}>
                         {debugGroups.map((group, idx) => (
                           <div key={idx} className="balance-item" style={{ fontSize: '0.85rem' }}>
                             <strong>{group.key}</strong>
                             <br />
-                            Count: {group.count}, Max: {group.maxCap}
+                            Antall: {group.count}, Maks: {group.maxCap}
                             <br />
-                            <span style={{ color: group.status.includes('OVERCROWDED') ? '#c41e3a' : '#2f7044' }}>
+                            <span style={{ color: group.status.includes('OVERFULL') ? '#c41e3a' : '#2f7044' }}>
                               {group.status}
                             </span>
                           </div>
@@ -1432,12 +1432,12 @@ function App() {
                     }}
                     className="clear-results-button"
                   >
-                    Clear
+                    Tøm
                   </button>
                 </div>
               )}
 
-              <h2>By Block</h2>
+              <h2>Per blokk</h2>
               <div className="block-summary-grid">
                 {parsedData.blockBreakdowns
                   .filter((item) => !blockFilter || item.block === blockFilter)
@@ -1446,10 +1446,10 @@ function App() {
                     return (
                       <article key={item.block} className={item.block === 'MATTE' ? 'matte-block' : ''}>
                         <strong>{item.block}</strong>
-                        <span>{item.subjectCount} subjects</span>
-                        <span>{item.groupCount} groups</span>
+                        <span>{item.subjectCount} fag</span>
+                        <span>{item.groupCount} grupper</span>
                         <span>
-                          {item.studentCount} students
+                          {item.studentCount} elever
                           {blockDelta !== undefined && (
                             <span style={{ marginLeft: '0.5rem', color: blockDelta > 0 ? '#2f7044' : '#c41e3a', fontWeight: 'bold' }}>
                               {blockDelta > 0 ? '+' : ''}{blockDelta}
@@ -1461,16 +1461,16 @@ function App() {
                   })}
               </div>
 
-              <h2>By Subject Group</h2>
+              <h2>Per faggruppe</h2>
               <table>
                 <thead>
                   <tr>
-                    <th>Subject</th>
-                    <th>Title</th>
-                    <th>Group</th>
-                    <th>Students</th>
-                    <th>Block</th>
-                    {balanceDeltaCounts.size > 0 && <th>Change</th>}
+                    <th>Fag</th>
+                    <th>Tittel</th>
+                    <th>Gruppe</th>
+                    <th>Elever</th>
+                    <th>Blokk</th>
+                    {balanceDeltaCounts.size > 0 && <th>Endring</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -1511,8 +1511,8 @@ function App() {
 
               {selectedGroupKey && (
                 <section className="group-members-panel">
-                  <h3>Students In Selected Subject Group</h3>
-                  <p>Click another row to switch subject/group/block.</p>
+                  <h3>Elever i valgt faggruppe</h3>
+                  <p>Klikk en annen rad for å bytte fag/gruppe/blokk.</p>
                   <div style={{ marginBottom: '1rem', display: 'flex', gap: '0.5rem' }}>
                     <button
                       type="button"
@@ -1736,14 +1736,14 @@ function App() {
                 </div>
               )}
 
-              <h2>By Subject (All Groups)</h2>
+              <h2>Per fag (alle grupper)</h2>
               <table>
                 <thead>
                   <tr>
-                    <th>Subject</th>
-                    <th>Title</th>
-                    <th>Students</th>
-                    <th>Blocks</th>
+                    <th>Fag</th>
+                    <th>Tittel</th>
+                    <th>Elever</th>
+                    <th>Blokker</th>
                   </tr>
                 </thead>
                 <tbody>
