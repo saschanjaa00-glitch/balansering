@@ -481,14 +481,6 @@ button {
   color: #1b4375;
 }
 
-article.matte-block {
-  background: #f2f5fb;
-}
-
-article.matte-block strong {
-  color: #2b4c78;
-}
-
 .student-list {
   margin-top: 0.7rem;
   max-height: 64vh;
@@ -548,6 +540,18 @@ th {
   background: #eaf2ff;
 }
 
+.expanded-row {
+  background: #f8f9fa !important;
+}
+
+.expanded-row:hover {
+  background: #f8f9fa !important;
+}
+
+.expanded-row td {
+  border-top: 1px solid #ddd;
+}
+
 .group-members-panel {
   margin-top: 0.78rem;
   padding: 0.72rem;
@@ -592,11 +596,6 @@ th {
 
 .inline-group-panel {
   margin: 0.35rem 0;
-}
-
-tr.matte-row {
-  background: #f6f8fc;
-  color: #44536f;
 }
 
 .student-subject-toolbar {

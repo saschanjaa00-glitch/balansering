@@ -967,13 +967,7 @@ function App() {
       return matchesSubject && matchesBlock && (!onlyBlokkfag || isBlokkfag)
     })
 
-    return filtered.sort((a, b) => {
-      const aIsMatte = a.block === 'MATTE'
-      const bIsMatte = b.block === 'MATTE'
-      if (aIsMatte && !bIsMatte) return 1
-      if (!aIsMatte && bIsMatte) return -1
-      return 0
-    })
+    return filtered
   }, [selectedStudent, subjectQuery, blockFilter, onlyBlokkfag])
 
   const filteredSubjects = useMemo(() => {
@@ -1265,7 +1259,6 @@ function App() {
                         {filteredAssignments.map((assignment) => (
                           <tr
                             key={`${assignment.subjectCode}-${assignment.groupCode}-${assignment.block}`}
-                            className={assignment.block === 'MATTE' ? 'matte-row' : ''}
                           >
                             <td>{assignment.subjectCode}</td>
                             <td>{assignment.subjectName}</td>
@@ -1444,7 +1437,7 @@ function App() {
                   .map((item) => {
                     const blockDelta = balanceBlockDeltaCounts.get(item.block)
                     return (
-                      <article key={item.block} className={item.block === 'MATTE' ? 'matte-block' : ''}>
+                      <article key={item.block}>
                         <strong>{item.block}</strong>
                         <span>{item.subjectCount} fag</span>
                         <span>{item.groupCount} grupper</span>
@@ -1477,85 +1470,102 @@ function App() {
                   {filteredGroupBreakdowns.map((item) => {
                     const groupKey = `${item.subjectCode}|${item.groupCode}|${item.block}`
                     const delta = balanceDeltaCounts.get(groupKey)
+                    const isExpanded = selectedGroupKey === `${item.subjectCode}-${item.groupCode}-${item.block}`
+                    const colSpan = balanceDeltaCounts.size > 0 ? 6 : 5
+                    
                     return (
-                      <tr
-                        key={`${item.subjectCode}-${item.groupCode}-${item.block}`}
-                        onClick={() => setSelectedGroupKey(`${item.subjectCode}-${item.groupCode}-${item.block}`)}
-                        className={
-                          selectedGroupKey === `${item.subjectCode}-${item.groupCode}-${item.block}`
-                            ? 'clickable-row active'
-                            : 'clickable-row'
-                        }
-                      >
-                        <td>{item.subjectCode}</td>
-                        <td>{item.subjectName}</td>
-                        <td>{item.groupCode}</td>
-                        <td>{item.studentCount}</td>
-                        <td>{item.block || '-'}</td>
-                        {balanceDeltaCounts.size > 0 && (
-                          <td>
-                            {delta !== undefined ? (
-                              <span style={{ color: delta > 0 ? '#2f7044' : '#c41e3a', fontWeight: 'bold' }}>
-                                {delta > 0 ? '+' : ''}{delta}
-                              </span>
-                            ) : (
-                              <span style={{ color: '#999' }}>-</span>
-                            )}
-                          </td>
+                      <>
+                        <tr
+                          key={`${item.subjectCode}-${item.groupCode}-${item.block}`}
+                          onClick={() => {
+                            const key = `${item.subjectCode}-${item.groupCode}-${item.block}`
+                            setSelectedGroupKey(isExpanded ? '' : key)
+                          }}
+                          className={isExpanded ? 'clickable-row active' : 'clickable-row'}
+                        >
+                          <td>{item.subjectCode}</td>
+                          <td>{item.subjectName}</td>
+                          <td>{item.groupCode}</td>
+                          <td>{item.studentCount}</td>
+                          <td>{item.block || '-'}</td>
+                          {balanceDeltaCounts.size > 0 && (
+                            <td>
+                              {delta !== undefined ? (
+                                <span style={{ color: delta > 0 ? '#2f7044' : '#c41e3a', fontWeight: 'bold' }}>
+                                  {delta > 0 ? '+' : ''}{delta}
+                                </span>
+                              ) : (
+                                <span style={{ color: '#999' }}>-</span>
+                              )}
+                            </td>
+                          )}
+                        </tr>
+                        {isExpanded && (
+                          <tr key={`${item.subjectCode}-${item.groupCode}-${item.block}-details`} className="expanded-row">
+                            <td colSpan={colSpan} style={{ padding: '1rem', backgroundColor: '#f8f9fa' }}>
+                              <div style={{ marginBottom: '1rem' }}>
+                                <strong>Elever i valgt faggruppe</strong>
+                                <p style={{ margin: '0.25rem 0 0.75rem 0', fontSize: '0.9rem', color: '#666' }}>
+                                  Klikk en annen rad for å bytte, eller klikk igjen for å lukke.
+                                </p>
+                              </div>
+                              <div style={{ marginBottom: '1rem', display: 'flex', gap: '0.5rem' }}>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setShowMassUpdateDialog(true)
+                                  }}
+                                  disabled={selectedStudentsForMassUpdate.size === 0}
+                                  className="balance-button"
+                                >
+                                  Massoppdater ({selectedStudentsForMassUpdate.size} valgt)
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setSelectedStudentsForMassUpdate(new Set())
+                                  }}
+                                  disabled={selectedStudentsForMassUpdate.size === 0}
+                                  className="clear-results-button"
+                                >
+                                  Tøm valg
+                                </button>
+                              </div>
+                              <div className="group-member-list">
+                                {selectedGroupMembers.map((student) => (
+                                  <div key={student.id} className="group-member-item" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedStudentsForMassUpdate.has(student.id)}
+                                      onChange={(e) => {
+                                        e.stopPropagation()
+                                        const newSet = new Set(selectedStudentsForMassUpdate)
+                                        if (e.target.checked) {
+                                          newSet.add(student.id)
+                                        } else {
+                                          newSet.delete(student.id)
+                                        }
+                                        setSelectedStudentsForMassUpdate(newSet)
+                                      }}
+                                      onClick={(e) => e.stopPropagation()}
+                                    />
+                                    <div style={{ flex: 1 }}>
+                                      <span>{student.fullName}</span>
+                                      <small>{student.id}</small>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </td>
+                          </tr>
                         )}
-                      </tr>
+                      </>
                     )
                   })}
                 </tbody>
               </table>
-
-              {selectedGroupKey && (
-                <section className="group-members-panel">
-                  <h3>Elever i valgt faggruppe</h3>
-                  <p>Klikk en annen rad for å bytte fag/gruppe/blokk.</p>
-                  <div style={{ marginBottom: '1rem', display: 'flex', gap: '0.5rem' }}>
-                    <button
-                      type="button"
-                      onClick={() => setShowMassUpdateDialog(true)}
-                      disabled={selectedStudentsForMassUpdate.size === 0}
-                      className="balance-button"
-                    >
-                      Massoppdater ({selectedStudentsForMassUpdate.size} valgt)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedStudentsForMassUpdate(new Set())}
-                      disabled={selectedStudentsForMassUpdate.size === 0}
-                      className="clear-results-button"
-                    >
-                      Tøm valg
-                    </button>
-                  </div>
-                  <div className="group-member-list">
-                    {selectedGroupMembers.map((student) => (
-                      <div key={student.id} className="group-member-item" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                        <input
-                          type="checkbox"
-                          checked={selectedStudentsForMassUpdate.has(student.id)}
-                          onChange={(e) => {
-                            const newSet = new Set(selectedStudentsForMassUpdate)
-                            if (e.target.checked) {
-                              newSet.add(student.id)
-                            } else {
-                              newSet.delete(student.id)
-                            }
-                            setSelectedStudentsForMassUpdate(newSet)
-                          }}
-                        />
-                        <div style={{ flex: 1 }}>
-                          <span>{student.fullName}</span>
-                          <small>{student.id}</small>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              )}
 
               {showMassUpdateDialog && (
                 <div className="modal-overlay" onClick={() => setShowMassUpdateDialog(false)}>
