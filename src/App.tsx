@@ -3007,7 +3007,7 @@ function App() {
                 className={viewMode === 'bytteoversikt' ? 'active' : ''}
                 onClick={() => setViewMode('bytteoversikt')}
               >
-                Bytteoversikt
+                Blokkvalg
               </button>
             </div>
             <div className="controls-actions">
@@ -4124,7 +4124,7 @@ function App() {
           ) : (
             <section className="subject-panel">
               <div className="subject-view-header">
-                <h2>Bytteoversikt</h2>
+                <h2>Blokkvalg</h2>
               </div>
 
               {(() => {
@@ -4283,6 +4283,20 @@ function App() {
                           if (rankDiff !== 0) {
                             return rankDiff
                           }
+                          
+                          // Sort by VG2 visibility (lighter colors first)
+                          const aVisibility = bytteSubjectVisibility[a.code] ?? { vg2: true, vg3: true }
+                          const bVisibility = bytteSubjectVisibility[b.code] ?? { vg2: true, vg3: true }
+                          const aIsVg3Only = isVg3OnlySubject(a.name)
+                          const bIsVg3Only = isVg3OnlySubject(b.name)
+                          
+                          const aIsLighter = !aIsVg3Only && aVisibility.vg2
+                          const bIsLighter = !bIsVg3Only && bVisibility.vg2
+                          
+                          if (aIsLighter !== bIsLighter) {
+                            return aIsLighter ? -1 : 1  // Lighter colors first
+                          }
+                          
                           return a.name.localeCompare(b.name)
                         })
 
@@ -4313,25 +4327,31 @@ function App() {
                             gap: '6px',
                             alignContent: 'start'
                           }}>
-                            {subjectsInBlock.map((subject) => (
-                              <div
-                                key={subject.code}
-                                style={{
-                                  border: '2px solid #333',
-                                  padding: '6px 10px',
-                                  backgroundColor: getSubjectColor(subject.name, !isVg3OnlySubject(subject.name)),
-                                  minWidth: '80px',
-                                  minHeight: '40px',
-                                  display: 'flex',
-                                  flexDirection: 'column',
-                                  justifyContent: 'center'
-                                }}
-                              >
-                                <div style={{ fontWeight: 'bold', fontSize: '0.75rem', lineHeight: 1.2 }}>
-                                  {getDisplaySubjectName(subject.name)}
+                            {subjectsInBlock.map((subject) => {
+                              const visibility = bytteSubjectVisibility[subject.code] ?? { vg2: true, vg3: true }
+                              const isVg3Only = isVg3OnlySubject(subject.name)
+                              const useLighterShade = !isVg3Only && visibility.vg2
+                              
+                              return (
+                                <div
+                                  key={subject.code}
+                                  style={{
+                                    border: '2px solid #333',
+                                    padding: '6px 10px',
+                                    backgroundColor: getSubjectColor(subject.name, useLighterShade),
+                                    minWidth: '80px',
+                                    minHeight: '40px',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    justifyContent: 'center'
+                                  }}
+                                >
+                                  <div style={{ fontWeight: 'bold', fontSize: '0.75rem', lineHeight: 1.2 }}>
+                                    {getDisplaySubjectName(subject.name)}
+                                  </div>
                                 </div>
-                              </div>
-                            ))}
+                              )
+                            })}
                           </div>
                         </div>
                       )

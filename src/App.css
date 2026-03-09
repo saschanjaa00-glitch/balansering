@@ -174,7 +174,7 @@
 
 .switch-group {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.4rem;
 }
 
@@ -228,6 +228,21 @@ button {
 .remove-duplicates-button {
   background: #f4f8fd;
   color: #20324d;
+}
+
+.switch-group button:nth-child(3),
+.switch-group button:nth-child(4) {
+  opacity: 0.6;
+}
+
+.switch-group button:nth-child(3):hover,
+.switch-group button:nth-child(4):hover {
+  opacity: 0.8;
+}
+
+.switch-group button:nth-child(3).active,
+.switch-group button:nth-child(4).active {
+  opacity: 1;
 }
 
 .switch-group button:hover,
