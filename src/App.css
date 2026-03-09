@@ -160,6 +160,18 @@
   background: #194a91;
 }
 
+.controls-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.history-button {
+  white-space: nowrap;
+}
+
 .switch-group {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -587,6 +599,28 @@ th {
   text-transform: uppercase;
 }
 
+.subject-overfilled-row td {
+  font-weight: 700;
+}
+
+.subject-over-limit {
+  color: #b42323;
+  font-weight: 700;
+}
+
+.per-faggruppe-toolbar {
+  margin: 0.3rem 0 0.45rem;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.per-faggruppe-toolbar label {
+  font-size: 0.88rem;
+  color: #4f6280;
+  font-weight: 600;
+}
+
 .clickable-row {
   cursor: pointer;
 }
@@ -652,10 +686,16 @@ th {
   display: flex;
   justify-content: space-between;
   gap: 0.5rem;
+  cursor: pointer;
 }
 
 .group-member-item small {
   color: #5f7090;
+}
+
+.group-member-selected {
+  background: #eaf2ff;
+  border-color: #b9cef0;
 }
 
 .group-member-added {
@@ -802,7 +842,11 @@ th {
     align-items: stretch;
   }
 
-  .export-button {
+  .controls-actions {
+    justify-content: stretch;
+  }
+
+  .controls-actions button {
     width: 100%;
   }
 

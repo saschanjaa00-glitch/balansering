@@ -98,6 +98,14 @@ type BalanceResultRun = {
   changes: BalanceChange[]
 }
 
+type HistorySnapshot = {
+  parsedData: ParsedData
+  balanceResults: BalanceChange[] | null
+  balanceHistory: BalanceResultRun[]
+  balanceMessage: string
+  debugGroups: Array<{ key: string; count: number; maxCap: number; status: string }>
+}
+
 
 
 const SUFFIX_BLOCKS: Record<string, string> = {
@@ -137,6 +145,13 @@ const EXCLUDED_CLASS_GROUPS = new Set<string>([
   '3IDB',
 ])
 
+const EXCLUDED_SUBJECT_TITLES_IN_OVERVIEW = new Set<string>([
+  'Matematikk S1',
+  'Matematikk R1',
+  'Toppidrett 2',
+  'Toppidrett 3',
+])
+
 const SUBJECT_MAX_CAPACITY: Record<string, number> = {
   'Kjemi 1': 24,
   'Kjemi 2': 24,
@@ -150,6 +165,8 @@ const STORAGE_KEYS = {
   balanceHistory: 'novaschem.balanceHistory.v1',
 }
 
+const MAX_HISTORY_STATES = 25
+
 type PersistedUiState = {
   selectedStudentId: string
   studentQuery: string
@@ -161,6 +178,7 @@ type PersistedUiState = {
   showOverloadedStudents: boolean
   showBlockCollisions: boolean
   showDuplicateSubjects: boolean
+  perFaggruppeSortBy?: 'blokk' | 'tittel' | 'students' | 'change'
 }
 
 function loadFromLocalStorage<T>(key: string, fallbackValue: T): T {
@@ -243,6 +261,63 @@ function escapeHtml(value: string): string {
     .replace(/>/gu, '&gt;')
     .replace(/"/gu, '&quot;')
     .replace(/'/gu, '&#39;')
+}
+
+const WINDOWS_1252_EXTENDED_MAP: Record<number, number> = {
+  0x20ac: 0x80,
+  0x201a: 0x82,
+  0x0192: 0x83,
+  0x201e: 0x84,
+  0x2026: 0x85,
+  0x2020: 0x86,
+  0x2021: 0x87,
+  0x02c6: 0x88,
+  0x2030: 0x89,
+  0x0160: 0x8a,
+  0x2039: 0x8b,
+  0x0152: 0x8c,
+  0x017d: 0x8e,
+  0x2018: 0x91,
+  0x2019: 0x92,
+  0x201c: 0x93,
+  0x201d: 0x94,
+  0x2022: 0x95,
+  0x2013: 0x96,
+  0x2014: 0x97,
+  0x02dc: 0x98,
+  0x2122: 0x99,
+  0x0161: 0x9a,
+  0x203a: 0x9b,
+  0x0153: 0x9c,
+  0x017e: 0x9e,
+  0x0178: 0x9f,
+}
+
+function encodeWindows1252(text: string): ArrayBuffer {
+  const bytes: number[] = []
+
+  for (const char of text) {
+    const codePoint = char.codePointAt(0)
+    if (codePoint === undefined) {
+      continue
+    }
+
+    const extended = WINDOWS_1252_EXTENDED_MAP[codePoint]
+    if (extended !== undefined) {
+      bytes.push(extended)
+      continue
+    }
+
+    if (codePoint <= 0xff) {
+      bytes.push(codePoint)
+      continue
+    }
+
+    // Fallback for characters outside Windows-1252.
+    bytes.push(0x3f)
+  }
+
+  return Uint8Array.from(bytes).buffer
 }
 
 function getMaxCapacityForSubject(subjectName: string): number {
@@ -1927,6 +2002,9 @@ function App() {
   const [showOverloadedStudents, setShowOverloadedStudents] = useState<boolean>(persistedUiState.showOverloadedStudents)
   const [showBlockCollisions, setShowBlockCollisions] = useState<boolean>(persistedUiState.showBlockCollisions)
   const [showDuplicateSubjects, setShowDuplicateSubjects] = useState<boolean>(persistedUiState.showDuplicateSubjects)
+  const [perFaggruppeSortBy, setPerFaggruppeSortBy] = useState<'blokk' | 'tittel' | 'students' | 'change'>(
+    persistedUiState.perFaggruppeSortBy ?? 'blokk',
+  )
   const [balanceResults, setBalanceResults] = useState<BalanceChange[] | null>(null)
   const [balanceHistory, setBalanceHistory] = useState<BalanceResultRun[]>(() => {
     const stored = loadFromLocalStorage<BalanceResultRun[]>(STORAGE_KEYS.balanceHistory, [])
@@ -1938,6 +2016,8 @@ function App() {
   const [debugGroups, setDebugGroups] = useState<Array<{ key: string; count: number; maxCap: number; status: string }>>([])
   const [balanceDeltaCounts, setBalanceDeltaCounts] = useState<Map<string, number>>(new Map())
   const [balanceBlockDeltaCounts, setBalanceBlockDeltaCounts] = useState<Map<string, number>>(new Map())
+  const [undoStack, setUndoStack] = useState<HistorySnapshot[]>([])
+  const [redoStack, setRedoStack] = useState<HistorySnapshot[]>([])
   const [errorMessage, setErrorMessage] = useState<string>('')
   const [selectedStudentsForMassUpdate, setSelectedStudentsForMassUpdate] = useState<Set<string>>(new Set())
   const [showMassUpdateDialog, setShowMassUpdateDialog] = useState<boolean>(false)
@@ -1954,6 +2034,22 @@ function App() {
   const [showProgressiveBalanceDialog, setShowProgressiveBalanceDialog] = useState<boolean>(false)
   const [progressiveBalanceMaxOffset, setProgressiveBalanceMaxOffset] = useState<number>(-4)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const isHistoryNavigationRef = useRef<boolean>(false)
+  const lastHistorySnapshotRef = useRef<HistorySnapshot | null>(null)
+
+  const createHistorySnapshot = (): HistorySnapshot | null => {
+    if (!parsedData) {
+      return null
+    }
+
+    return {
+      parsedData,
+      balanceResults: balanceResults ? [...balanceResults] : null,
+      balanceHistory: [...balanceHistory],
+      balanceMessage,
+      debugGroups: [...debugGroups],
+    }
+  }
 
   const clearStoredData = (): void => {
     removeFromLocalStorage(STORAGE_KEYS.parsedData)
@@ -1972,12 +2068,15 @@ function App() {
     setShowOverloadedStudents(false)
     setShowBlockCollisions(false)
     setShowDuplicateSubjects(false)
+    setPerFaggruppeSortBy('blokk')
     setBalanceResults(null)
     setBalanceHistory([])
     setBalanceMessage('')
     setDebugGroups([])
     setBalanceDeltaCounts(new Map())
     setBalanceBlockDeltaCounts(new Map())
+    setUndoStack([])
+    setRedoStack([])
     setErrorMessage('')
     setSelectedStudentsForMassUpdate(new Set())
     setShowMassUpdateDialog(false)
@@ -1991,6 +2090,8 @@ function App() {
     setStudentAddSubjectCode('')
     setStudentAddSubjectBlock('')
     setPendingRemovalAssignment('')
+    lastHistorySnapshotRef.current = null
+    isHistoryNavigationRef.current = false
 
     // Allow selecting the same file again after clearing data.
     if (fileInputRef.current) {
@@ -2001,6 +2102,69 @@ function App() {
   useEffect(() => {
     saveToLocalStorage(STORAGE_KEYS.parsedData, parsedData)
   }, [parsedData])
+
+  useEffect(() => {
+    const currentSnapshot = createHistorySnapshot()
+
+    if (isHistoryNavigationRef.current) {
+      isHistoryNavigationRef.current = false
+      lastHistorySnapshotRef.current = currentSnapshot
+      return
+    }
+
+    if (!currentSnapshot) {
+      setUndoStack([])
+      setRedoStack([])
+      lastHistorySnapshotRef.current = null
+      return
+    }
+
+    const previousSnapshot = lastHistorySnapshotRef.current
+    if (previousSnapshot && previousSnapshot.parsedData !== currentSnapshot.parsedData) {
+      setUndoStack((stack) => [...stack, previousSnapshot].slice(-MAX_HISTORY_STATES))
+      setRedoStack([])
+    }
+
+    lastHistorySnapshotRef.current = currentSnapshot
+  }, [parsedData, balanceResults, balanceHistory, balanceMessage, debugGroups])
+
+  const handleUndo = (): void => {
+    if (undoStack.length === 0) {
+      return
+    }
+
+    const previousState = undoStack[undoStack.length - 1]
+    const currentSnapshot = createHistorySnapshot()
+    setUndoStack((stack) => stack.slice(0, -1))
+    if (currentSnapshot) {
+      setRedoStack((stack) => [...stack, currentSnapshot].slice(-MAX_HISTORY_STATES))
+    }
+    isHistoryNavigationRef.current = true
+    setParsedData(previousState.parsedData)
+    setBalanceResults(previousState.balanceResults)
+    setBalanceHistory(previousState.balanceHistory)
+    setBalanceMessage(previousState.balanceMessage)
+    setDebugGroups(previousState.debugGroups)
+  }
+
+  const handleRedo = (): void => {
+    if (redoStack.length === 0) {
+      return
+    }
+
+    const nextState = redoStack[redoStack.length - 1]
+    const currentSnapshot = createHistorySnapshot()
+    setRedoStack((stack) => stack.slice(0, -1))
+    if (currentSnapshot) {
+      setUndoStack((stack) => [...stack, currentSnapshot].slice(-MAX_HISTORY_STATES))
+    }
+    isHistoryNavigationRef.current = true
+    setParsedData(nextState.parsedData)
+    setBalanceResults(nextState.balanceResults)
+    setBalanceHistory(nextState.balanceHistory)
+    setBalanceMessage(nextState.balanceMessage)
+    setDebugGroups(nextState.debugGroups)
+  }
 
   useEffect(() => {
     if (!parsedData) {
@@ -2030,9 +2194,10 @@ function App() {
       showOverloadedStudents,
       showBlockCollisions,
       showDuplicateSubjects,
+      perFaggruppeSortBy,
     }
     saveToLocalStorage(STORAGE_KEYS.uiState, stateToPersist)
-  }, [selectedStudentId, studentQuery, subjectQuery, blockFilter, viewMode, onlyBlokkfag, showIncompleteBlocks, showOverloadedStudents, showBlockCollisions, showDuplicateSubjects])
+  }, [selectedStudentId, studentQuery, subjectQuery, blockFilter, viewMode, onlyBlokkfag, showIncompleteBlocks, showOverloadedStudents, showBlockCollisions, showDuplicateSubjects, perFaggruppeSortBy])
 
   const selectedStudent = useMemo(() => {
     if (!parsedData || !selectedStudentId) {
@@ -2202,10 +2367,100 @@ function App() {
       })
   }, [parsedData, subjectQuery, blockFilter, onlyBlokkfag])
 
+  const perSubjectBlockColumns = useMemo(() => {
+    if (!parsedData) {
+      return [] as string[]
+    }
+
+    const uniqueBlocks = Array.from(
+      new Set(parsedData.blocks.filter((block) => block.trim().length > 0 && block !== 'MATTE')),
+    )
+    return sortBlocks(uniqueBlocks)
+  }, [parsedData])
+
+  const perSubjectMatrixRows = useMemo(() => {
+    if (!parsedData) {
+      return [] as Array<{
+        subject: SubjectRecord
+        maxCap: number
+        countsByBlock: Map<string, number>
+        hasGroupByBlock: Map<string, boolean>
+        total: number
+        isOverfilled: boolean
+      }>
+    }
+
+    const countsBySubjectBlock = new Map<string, number>()
+    const hasGroupBySubjectBlock = new Set<string>()
+    const overfilledSubjectCodes = new Set<string>()
+
+    parsedData.groupBreakdowns.forEach((group) => {
+      const key = `${group.subjectCode}|${group.block}`
+      countsBySubjectBlock.set(key, (countsBySubjectBlock.get(key) || 0) + group.studentCount)
+      hasGroupBySubjectBlock.add(key)
+
+      if (group.studentCount > getMaxCapacityForSubject(group.subjectName)) {
+        overfilledSubjectCodes.add(group.subjectCode)
+      }
+    })
+
+    return filteredSubjects
+      .slice()
+      .filter((subject) => !EXCLUDED_SUBJECT_TITLES_IN_OVERVIEW.has(subject.name))
+      .sort((a, b) => a.name.localeCompare(b.name, 'nb-NO'))
+      .map((subject) => {
+        const maxCap = getMaxCapacityForSubject(subject.name)
+        const countsByBlock = new Map<string, number>()
+        const hasGroupByBlock = new Map<string, boolean>()
+
+        perSubjectBlockColumns.forEach((block) => {
+          const subjectBlockKey = `${subject.code}|${block}`
+          const count = countsBySubjectBlock.get(subjectBlockKey) || 0
+          countsByBlock.set(block, count)
+          hasGroupByBlock.set(block, hasGroupBySubjectBlock.has(subjectBlockKey))
+        })
+
+        const total = perSubjectBlockColumns.reduce((sum, block) => {
+          if (!hasGroupByBlock.get(block)) {
+            return sum
+          }
+          return sum + (countsByBlock.get(block) || 0)
+        }, 0)
+
+        return {
+          subject,
+          maxCap,
+          countsByBlock,
+          hasGroupByBlock,
+          total,
+          isOverfilled: overfilledSubjectCodes.has(subject.code),
+        }
+      })
+  }, [parsedData, filteredSubjects, perSubjectBlockColumns])
+
   const filteredGroupBreakdowns = useMemo(() => {
     if (!parsedData) {
       return []
     }
+
+    const compareBlocks = (aBlock: string, bBlock: string): number => {
+      const aIsNumeric = /^Blokk \d+$/u.test(aBlock)
+      const bIsNumeric = /^Blokk \d+$/u.test(bBlock)
+
+      if (aIsNumeric && bIsNumeric) {
+        const aNum = parseInt(aBlock.split(' ')[1], 10)
+        const bNum = parseInt(bBlock.split(' ')[1], 10)
+        return aNum - bNum
+      }
+      if (aIsNumeric) {
+        return -1
+      }
+      if (bIsNumeric) {
+        return 1
+      }
+      return aBlock.localeCompare(bBlock)
+    }
+
     const needle = subjectQuery.trim().toLowerCase()
     return parsedData.groupBreakdowns
       .filter((item) => {
@@ -2222,30 +2477,56 @@ function App() {
          return matchesSearch && shouldIncludeBlock && (!onlyBlokkfag || isBlokkfag)
       })
       .sort((a, b) => {
-        // Compare blocks using same logic as sortBlocks
-        const aIsNumeric = /^Blokk \d+$/u.test(a.block)
-        const bIsNumeric = /^Blokk \d+$/u.test(b.block)
+        const blockComparison = compareBlocks(a.block, b.block)
+        const titleComparison = a.subjectName.localeCompare(b.subjectName, 'nb-NO')
 
-        let blockComparison = 0
-        if (aIsNumeric && bIsNumeric) {
-          const aNum = parseInt(a.block.split(' ')[1], 10)
-          const bNum = parseInt(b.block.split(' ')[1], 10)
-          blockComparison = aNum - bNum
-        } else if (aIsNumeric) {
-          blockComparison = -1
-        } else if (bIsNumeric) {
-          blockComparison = 1
-        } else {
-          blockComparison = a.block.localeCompare(b.block)
+        if (perFaggruppeSortBy === 'blokk') {
+          if (blockComparison !== 0) {
+            return blockComparison
+          }
+          if (titleComparison !== 0) {
+            return titleComparison
+          }
+          return a.groupCode.localeCompare(b.groupCode)
         }
 
-        // If blocks are equal, sort by subject name
+        if (perFaggruppeSortBy === 'tittel') {
+          if (titleComparison !== 0) {
+            return titleComparison
+          }
+          if (blockComparison !== 0) {
+            return blockComparison
+          }
+          return a.groupCode.localeCompare(b.groupCode)
+        }
+
+        if (perFaggruppeSortBy === 'students') {
+          if (b.studentCount !== a.studentCount) {
+            return b.studentCount - a.studentCount
+          }
+          if (titleComparison !== 0) {
+            return titleComparison
+          }
+          if (blockComparison !== 0) {
+            return blockComparison
+          }
+          return a.groupCode.localeCompare(b.groupCode)
+        }
+
+        const aDelta = balanceDeltaCounts.get(`${a.subjectCode}|${a.groupCode}|${a.block}`) || 0
+        const bDelta = balanceDeltaCounts.get(`${b.subjectCode}|${b.groupCode}|${b.block}`) || 0
+        if (bDelta !== aDelta) {
+          return bDelta - aDelta
+        }
+        if (titleComparison !== 0) {
+          return titleComparison
+        }
         if (blockComparison !== 0) {
           return blockComparison
         }
-        return a.subjectName.localeCompare(b.subjectName)
+        return a.groupCode.localeCompare(b.groupCode)
       })
-  }, [parsedData, subjectQuery, blockFilter, onlyBlokkfag])
+  }, [parsedData, subjectQuery, blockFilter, onlyBlokkfag, perFaggruppeSortBy, balanceDeltaCounts])
 
   const studentMetaById = useMemo(() => {
     const map = new Map<string, { id: string; fullName: string; classGroup: string }>()
@@ -2495,12 +2776,12 @@ function App() {
 
     try {
       const exportText = buildExportText(parsedData)
-      const sourceName = parsedData.sourceFileName || 'novaschem-eksport.txt'
-      const hasTxtExtension = /\.txt$/iu.test(sourceName)
-      const baseName = hasTxtExtension ? sourceName.replace(/\.txt$/iu, '') : sourceName
-      const downloadName = `${baseName}-endret.txt`
+      const now = new Date()
+      const yyyymmdd = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
+      const downloadName = `${yyyymmdd}timeplan.txt`
 
-      const blob = new Blob([exportText], { type: 'text/plain;charset=utf-8' })
+      const encodedExportBuffer = encodeWindows1252(exportText)
+      const blob = new Blob([encodedExportBuffer], { type: 'text/plain;charset=windows-1252' })
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
       anchor.href = url
@@ -2525,6 +2806,10 @@ function App() {
       const fileBuffer = await file.arrayBuffer()
       const text = decodeBestEffort(fileBuffer)
       const parsed = parseNovaschemExport(text, file.name)
+      setUndoStack([])
+      setRedoStack([])
+      lastHistorySnapshotRef.current = null
+      isHistoryNavigationRef.current = false
       setParsedData(parsed)
       setSelectedStudentId(parsed.students[0]?.id || '')
       setSelectedGroupKey('')
@@ -2533,6 +2818,10 @@ function App() {
       setBlockFilter('')
       setErrorMessage('')
     } catch {
+      setUndoStack([])
+      setRedoStack([])
+      lastHistorySnapshotRef.current = null
+      isHistoryNavigationRef.current = false
       setParsedData(null)
       setSelectedStudentId('')
       setSelectedGroupKey('')
@@ -2605,9 +2894,17 @@ function App() {
                 Fagvisning
               </button>
             </div>
-            <button type="button" className="export-button" onClick={handleExport}>
-              Eksporter TXT
-            </button>
+            <div className="controls-actions">
+              <button type="button" className="clear-results-button history-button" onClick={handleUndo} disabled={undoStack.length === 0}>
+                Undo ({undoStack.length})
+              </button>
+              <button type="button" className="clear-results-button history-button" onClick={handleRedo} disabled={redoStack.length === 0}>
+                Redo ({redoStack.length})
+              </button>
+              <button type="button" className="export-button" onClick={handleExport}>
+                Eksporter TXT
+              </button>
+            </div>
           </section>
 
           <section className="secondary-controls-row">
@@ -2987,6 +3284,19 @@ function App() {
               </div>
 
               <h2>Per faggruppe</h2>
+              <div className="per-faggruppe-toolbar">
+                <label htmlFor="per-faggruppe-sort">Sortér:</label>
+                <select
+                  id="per-faggruppe-sort"
+                  value={perFaggruppeSortBy}
+                  onChange={(event) => setPerFaggruppeSortBy(event.target.value as 'blokk' | 'tittel' | 'students' | 'change')}
+                >
+                  <option value="blokk">Blokk</option>
+                  <option value="tittel">Tittel</option>
+                  <option value="students">Antall elever</option>
+                  <option value="change">Endring</option>
+                </select>
+              </div>
               <table>
                 <thead>
                   <tr>
@@ -3073,6 +3383,8 @@ function App() {
                                   <div
                                     key={`${student.status}-${student.id}`}
                                     className={`group-member-item ${
+                                      selectedStudentsForMassUpdate.has(student.id) ? 'group-member-selected' : ''
+                                    } ${
                                       student.status === 'added'
                                         ? 'group-member-added'
                                         : student.status === 'removed'
@@ -3080,28 +3392,23 @@ function App() {
                                           : ''
                                     }`}
                                     style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      if (student.status === 'removed') {
+                                        return
+                                      }
+
+                                      const next = new Set(selectedStudentsForMassUpdate)
+                                      if (next.has(student.id)) {
+                                        next.delete(student.id)
+                                      } else {
+                                        next.add(student.id)
+                                      }
+                                      setSelectedStudentsForMassUpdate(next)
+                                    }}
                                   >
-                                    {student.status !== 'removed' ? (
-                                      <input
-                                        type="checkbox"
-                                        checked={selectedStudentsForMassUpdate.has(student.id)}
-                                        onChange={(e) => {
-                                          e.stopPropagation()
-                                          const newSet = new Set(selectedStudentsForMassUpdate)
-                                          if (e.target.checked) {
-                                            newSet.add(student.id)
-                                          } else {
-                                            newSet.delete(student.id)
-                                          }
-                                          setSelectedStudentsForMassUpdate(newSet)
-                                        }}
-                                        onClick={(e) => e.stopPropagation()}
-                                      />
-                                    ) : (
-                                      <span style={{ width: '1rem' }} />
-                                    )}
                                     <div style={{ flex: 1 }}>
-                                      <span>{student.fullName}</span>
+                                      <span>{student.fullName}</span>{' '}
                                       <small>
                                         {student.classGroup ? `${student.classGroup} | ` : ''}
                                         {student.id}
@@ -3546,17 +3853,29 @@ function App() {
                   <tr>
                     <th>Fag</th>
                     <th>Tittel</th>
-                    <th>Elever</th>
-                    <th>Blokker</th>
+                    {perSubjectBlockColumns.map((block) => (
+                      <th key={`head-${block}`}>{block}</th>
+                    ))}
+                    <th>Total</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredSubjects.map((subject) => (
-                    <tr key={subject.code}>
-                      <td>{subject.code}</td>
-                      <td>{subject.name}</td>
-                      <td>{subject.studentCount}</td>
-                      <td>{subject.blocks.length > 0 ? subject.blocks.join(', ') : '-'}</td>
+                  {perSubjectMatrixRows.map((row) => (
+                    <tr key={row.subject.code} className={row.isOverfilled ? 'subject-overfilled-row' : ''}>
+                      <td>{row.subject.code}</td>
+                      <td>{row.subject.name}</td>
+                      {perSubjectBlockColumns.map((block) => {
+                        const hasGroup = row.hasGroupByBlock.get(block) || false
+                        const count = row.countsByBlock.get(block) || 0
+                        const isOverLimit = hasGroup && count > row.maxCap
+
+                        return (
+                          <td key={`${row.subject.code}-${block}`} className={isOverLimit ? 'subject-over-limit' : ''}>
+                            {hasGroup ? count : '-'}
+                          </td>
+                        )
+                      })}
+                      <td>{row.total}</td>
                     </tr>
                   ))}
                 </tbody>
