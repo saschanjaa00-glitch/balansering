@@ -172,7 +172,7 @@ type PersistedUiState = {
   studentQuery: string
   subjectQuery: string
   blockFilter: string
-  viewMode: 'students' | 'subjects'
+  viewMode: 'students' | 'subjects' | 'blokkoversikt' | 'bytteoversikt'
   onlyBlokkfag: boolean
   showIncompleteBlocks: boolean
   showOverloadedStudents: boolean
@@ -180,6 +180,8 @@ type PersistedUiState = {
   showDuplicateSubjects: boolean
   perFaggruppeSortBy?: 'blokk' | 'tittel' | 'students' | 'change'
 }
+
+type BytteSubjectVisibility = Record<string, { vg2: boolean; vg3: boolean }>
 
 function loadFromLocalStorage<T>(key: string, fallbackValue: T): T {
   try {
@@ -237,6 +239,34 @@ function summarizeBalanceChanges(rawChanges: BalanceChange[]): BalanceChange[] {
     .map((key) => byStudentAndSubject.get(key))
     .filter((change): change is BalanceChange => Boolean(change))
     .filter((change) => !(change.fromBlock === change.toBlock && change.fromGroupCode === change.toGroupCode))
+}
+
+function isInverseBalanceChange(previous: BalanceChange, next: BalanceChange): boolean {
+  return (
+    previous.studentId === next.studentId &&
+    previous.subjectCode === next.subjectCode &&
+    previous.fromGroupCode === next.toGroupCode &&
+    previous.fromBlock === next.toBlock &&
+    previous.toGroupCode === next.fromGroupCode &&
+    previous.toBlock === next.fromBlock
+  )
+}
+
+function formatBalanceChangeText(change: BalanceChange): string {
+  const fromGroup = change.fromGroupCode.trim()
+  const fromBlock = change.fromBlock.trim()
+  const toGroup = change.toGroupCode.trim()
+  const toBlock = change.toBlock.trim()
+
+  if (!fromGroup && !fromBlock && (toGroup || toBlock)) {
+    return `Lagt til: ${toBlock || '-'} (${toGroup || '-'})`
+  }
+
+  if (!toGroup && !toBlock && (fromGroup || fromBlock)) {
+    return `Fjernet: ${fromBlock || '-'} (${fromGroup || '-'})`
+  }
+
+  return `${fromBlock || '-'} (${fromGroup || '-'}) -> ${toBlock || '-'} (${toGroup || '-'})`
 }
 
 function formatTimestamp(iso: string): string {
@@ -1995,7 +2025,7 @@ function App() {
   const [studentQuery, setStudentQuery] = useState<string>(persistedUiState.studentQuery)
   const [subjectQuery, setSubjectQuery] = useState<string>(persistedUiState.subjectQuery)
   const [blockFilter, setBlockFilter] = useState<string>(persistedUiState.blockFilter)
-  const [viewMode, setViewMode] = useState<'students' | 'subjects'>(persistedUiState.viewMode)
+  const [viewMode, setViewMode] = useState<'students' | 'subjects' | 'blokkoversikt' | 'bytteoversikt'>(persistedUiState.viewMode)
   const [selectedGroupKey, setSelectedGroupKey] = useState<string>('')
   const [onlyBlokkfag, setOnlyBlokkfag] = useState<boolean>(persistedUiState.onlyBlokkfag)
   const [showIncompleteBlocks, setShowIncompleteBlocks] = useState<boolean>(persistedUiState.showIncompleteBlocks)
@@ -2033,6 +2063,8 @@ function App() {
   const [pendingRemovalAssignment, setPendingRemovalAssignment] = useState<string>('')
   const [showProgressiveBalanceDialog, setShowProgressiveBalanceDialog] = useState<boolean>(false)
   const [progressiveBalanceMaxOffset, setProgressiveBalanceMaxOffset] = useState<number>(-4)
+  const [bytteSubjectVisibility, setBytteSubjectVisibility] = useState<BytteSubjectVisibility>({})
+  const [bytteOptionsExpanded, setBytteOptionsExpanded] = useState<boolean>(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const isHistoryNavigationRef = useRef<boolean>(false)
   const lastHistorySnapshotRef = useRef<HistorySnapshot | null>(null)
@@ -2090,6 +2122,7 @@ function App() {
     setStudentAddSubjectCode('')
     setStudentAddSubjectBlock('')
     setPendingRemovalAssignment('')
+    setBytteSubjectVisibility({})
     lastHistorySnapshotRef.current = null
     isHistoryNavigationRef.current = false
 
@@ -2176,6 +2209,32 @@ function App() {
     const { groupDeltas, blockDeltas } = computeTotalDeltaCounts(parsedData)
     setBalanceDeltaCounts(groupDeltas)
     setBalanceBlockDeltaCounts(blockDeltas)
+  }, [parsedData])
+
+  useEffect(() => {
+    if (!parsedData) {
+      setBytteSubjectVisibility({})
+      return
+    }
+
+    const subjectCodes = new Set(parsedData.subjects.map((subject) => subject.code))
+    setBytteSubjectVisibility((previous) => {
+      const next: BytteSubjectVisibility = {}
+
+      for (const subject of parsedData.subjects) {
+        const existing = previous[subject.code]
+        next[subject.code] = existing ?? { vg2: true, vg3: true }
+      }
+
+      const hasSameEntries = Object.keys(previous).length === Object.keys(next).length
+        && Array.from(subjectCodes).every((code) => {
+          const prevValue = previous[code]
+          const nextValue = next[code]
+          return !!prevValue && prevValue.vg2 === nextValue.vg2 && prevValue.vg3 === nextValue.vg3
+        })
+
+      return hasSameEntries ? previous : next
+    })
   }, [parsedData])
 
   useEffect(() => {
@@ -2722,6 +2781,52 @@ function App() {
     setBalanceHistory((previous) => [...previous, run])
   }
 
+  const appendManualBalanceHistoryRun = (changes: BalanceChange[], message: string): void => {
+    const summarized = summarizeBalanceChanges(changes)
+    if (summarized.length === 0) {
+      return
+    }
+
+    setBalanceHistory((previous) => {
+      const nextHistory = previous.map((run) => ({ ...run, changes: [...run.changes] }))
+      const remaining: BalanceChange[] = []
+
+      summarized.forEach((change) => {
+        let canceled = false
+
+        for (let runIndex = nextHistory.length - 1; runIndex >= 0 && !canceled; runIndex -= 1) {
+          const run = nextHistory[runIndex]
+          for (let changeIndex = run.changes.length - 1; changeIndex >= 0; changeIndex -= 1) {
+            const existing = run.changes[changeIndex]
+            if (isInverseBalanceChange(existing, change)) {
+              run.changes.splice(changeIndex, 1)
+              canceled = true
+              break
+            }
+          }
+        }
+
+        if (!canceled) {
+          remaining.push(change)
+        }
+      })
+
+      const cleanedHistory = nextHistory.filter((run) => run.changes.length > 0)
+      if (remaining.length === 0) {
+        return cleanedHistory
+      }
+
+      const run: BalanceResultRun = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        createdAt: new Date().toISOString(),
+        message,
+        changes: remaining,
+      }
+
+      return [...cleanedHistory, run]
+    })
+  }
+
   const handleExportBalanceResultsWord = (): void => {
     if (balanceHistoryByStudent.length === 0) {
       setErrorMessage('Ingen balanseringsresultater a eksportere enda.')
@@ -2739,11 +2844,8 @@ function App() {
             const lines = run.changes
               .map((change) => {
                 const subjectName = escapeHtml(change.subjectName || change.subjectCode)
-                const fromBlock = escapeHtml(change.fromBlock)
-                const fromGroup = escapeHtml(change.fromGroupCode)
-                const toBlock = escapeHtml(change.toBlock)
-                const toGroup = escapeHtml(change.toGroupCode)
-                return `<li><strong>${subjectName}</strong>: ${fromBlock} (${fromGroup}) -> ${toBlock} (${toGroup})</li>`
+                const changeText = escapeHtml(formatBalanceChangeText(change))
+                return `<li><strong>${subjectName}</strong>: ${changeText}</li>`
               })
               .join('')
             return `<div class="run"><div class="run-head"><span>${escapeHtml(formatTimestamp(run.createdAt))}</span></div><ul>${lines}</ul></div>`
@@ -2892,6 +2994,20 @@ function App() {
                 onClick={() => setViewMode('subjects')}
               >
                 Fagvisning
+              </button>
+              <button
+                type="button"
+                className={viewMode === 'blokkoversikt' ? 'active' : ''}
+                onClick={() => setViewMode('blokkoversikt')}
+              >
+                Blokkoversikt
+              </button>
+              <button
+                type="button"
+                className={viewMode === 'bytteoversikt' ? 'active' : ''}
+                onClick={() => setViewMode('bytteoversikt')}
+              >
+                Bytteoversikt
               </button>
             </div>
             <div className="controls-actions">
@@ -3093,6 +3209,22 @@ function App() {
                                       blockBreakdowns,
                                     })
 
+                                    appendManualBalanceHistoryRun(
+                                      [
+                                        {
+                                          studentId: selectedStudent.id,
+                                          studentName: selectedStudent.fullName,
+                                          subjectCode: assignment.subjectCode,
+                                          subjectName: assignment.subjectName,
+                                          fromGroupCode: assignment.groupCode,
+                                          fromBlock: assignment.block,
+                                          toGroupCode: '',
+                                          toBlock: '',
+                                        },
+                                      ],
+                                      `${assignment.subjectName} fjernet for ${selectedStudent.fullName}`,
+                                    )
+
                                     setPendingRemovalAssignment('')
                                     setBalanceMessage(`${assignment.subjectName} fjernet for ${selectedStudent.fullName}`)
                                   }}
@@ -3120,7 +3252,7 @@ function App() {
                 )}
               </article>
             </section>
-          ) : (
+          ) : viewMode === 'subjects' ? (
             <section className="subject-panel">
               <div className="subject-view-header">
                 <h2>Fagvisning</h2>
@@ -3199,7 +3331,7 @@ function App() {
                               </div>
                               {run.changes.map((change) => (
                                 <div key={`${run.runId}-${change.subjectCode}-${change.fromGroupCode}-${change.toGroupCode}-${change.fromBlock}-${change.toBlock}`} className="balance-change-line balance-change-moved">
-                                  <strong>{change.subjectName || change.subjectCode}</strong>: {change.fromBlock} ({change.fromGroupCode}) &rarr; {change.toBlock} ({change.toGroupCode})
+                                  <strong>{change.subjectName || change.subjectCode}</strong>: {formatBalanceChangeText(change)}
                                 </div>
                               ))}
                             </div>
@@ -3503,11 +3635,55 @@ function App() {
 
                             targetGroups.sort((a, b) => a.studentCount - b.studentCount)
                             const smallestGroup = targetGroups[0]
+                            const manualChanges: BalanceChange[] = []
 
                             // Apply mass update by directly manipulating student assignments
                             const updatedStudents = parsedData!.students.map((student) => {
                               if (!selectedStudentsForMassUpdate.has(student.id)) {
                                 return student
+                              }
+
+                              const oldAssignment = student.assignments.find(
+                                (a) => a.subjectCode === oldSubjectCode && a.groupCode === oldGroupCode && a.block === oldBlock,
+                              )
+                              if (!oldAssignment) {
+                                return student
+                              }
+
+                              if (oldAssignment.subjectCode === massUpdateTargetSubject) {
+                                manualChanges.push({
+                                  studentId: student.id,
+                                  studentName: student.fullName,
+                                  subjectCode: massUpdateTargetSubject,
+                                  subjectName: targetSubject.name,
+                                  fromGroupCode: oldAssignment.groupCode,
+                                  fromBlock: oldAssignment.block,
+                                  toGroupCode: smallestGroup.groupCode,
+                                  toBlock: massUpdateTargetBlock,
+                                })
+                              } else {
+                                manualChanges.push(
+                                  {
+                                    studentId: student.id,
+                                    studentName: student.fullName,
+                                    subjectCode: oldAssignment.subjectCode,
+                                    subjectName: oldAssignment.subjectName,
+                                    fromGroupCode: oldAssignment.groupCode,
+                                    fromBlock: oldAssignment.block,
+                                    toGroupCode: '',
+                                    toBlock: '',
+                                  },
+                                  {
+                                    studentId: student.id,
+                                    studentName: student.fullName,
+                                    subjectCode: massUpdateTargetSubject,
+                                    subjectName: targetSubject.name,
+                                    fromGroupCode: '',
+                                    fromBlock: '',
+                                    toGroupCode: smallestGroup.groupCode,
+                                    toBlock: massUpdateTargetBlock,
+                                  },
+                                )
                               }
 
                               // Remove old assignment and add new one
@@ -3535,6 +3711,11 @@ function App() {
                               blockBreakdowns: newBlockBreakdowns,
                             }
                             setParsedData(updatedData)
+
+                            appendManualBalanceHistoryRun(
+                              manualChanges,
+                              `Masseoppdatering: ${manualChanges.length} elever flyttet til ${targetSubject.name} (${smallestGroup.groupCode}) i ${massUpdateTargetBlock}`,
+                            )
 
                             // Update message
                             setBalanceMessage(`Masseoppdatering: ${selectedStudentsForMassUpdate.size} elever flyttet til ${targetSubject.name} (${smallestGroup.groupCode}) i ${massUpdateTargetBlock}`)
@@ -3568,11 +3749,33 @@ function App() {
                             const [oldSubjectCode, oldGroupCode, oldBlock] = selectedGroupKey.split('-')
                             const oldSubjectName =
                               parsedData?.subjects.find((subject) => subject.code === oldSubjectCode)?.name || oldSubjectCode
+                            const manualChanges: BalanceChange[] = []
 
                             const updatedStudents = parsedData!.students.map((student) => {
                               if (!selectedStudentsForMassUpdate.has(student.id)) {
                                 return student
                               }
+
+                              const oldAssignment = student.assignments.find(
+                                (assignment) =>
+                                  assignment.subjectCode === oldSubjectCode &&
+                                  assignment.groupCode === oldGroupCode &&
+                                  assignment.block === oldBlock,
+                              )
+                              if (!oldAssignment) {
+                                return student
+                              }
+
+                              manualChanges.push({
+                                studentId: student.id,
+                                studentName: student.fullName,
+                                subjectCode: oldSubjectCode,
+                                subjectName: oldAssignment.subjectName,
+                                fromGroupCode: oldAssignment.groupCode,
+                                fromBlock: oldAssignment.block,
+                                toGroupCode: '',
+                                toBlock: '',
+                              })
 
                               return {
                                 ...student,
@@ -3599,6 +3802,11 @@ function App() {
                               blockBreakdowns: newBlockBreakdowns,
                             }
                             setParsedData(updatedData)
+
+                            appendManualBalanceHistoryRun(
+                              manualChanges,
+                              `Masseoppdatering: ${manualChanges.length} elever fjernet fra ${oldSubjectName} (${oldGroupCode}) i ${oldBlock}`,
+                            )
 
                             setBalanceMessage(
                               `Masseoppdatering: ${selectedStudentsForMassUpdate.size} elever fjernet fra ${oldSubjectName} (${oldGroupCode}) i ${oldBlock}`,
@@ -3881,6 +4089,336 @@ function App() {
                 </tbody>
               </table>
             </section>
+          ) : viewMode === 'blokkoversikt' ? (
+            <section className="subject-panel">
+              <div className="subject-view-header">
+                <h2>Blokkoversikt</h2>
+              </div>
+
+              <table>
+                <thead>
+                  <tr>
+                    <th>Fag</th>
+                    <th>Tittel</th>
+                    <th>Blokker</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredSubjects
+                    .slice()
+                    .sort((a, b) => a.name.localeCompare(b.name))
+                    .map((subject) => {
+                      const sortedBlocks = sortBlocks([...subject.blocks])
+
+                      return (
+                        <tr key={`${subject.code}-blokkoversikt`}>
+                          <td>{subject.code}</td>
+                          <td>{subject.name}</td>
+                          <td>{sortedBlocks.length > 0 ? sortedBlocks.join(', ') : '-'}</td>
+                        </tr>
+                      )
+                    })}
+                </tbody>
+              </table>
+            </section>
+          ) : (
+            <section className="subject-panel">
+              <div className="subject-view-header">
+                <h2>Bytteoversikt</h2>
+              </div>
+
+              {(() => {
+                const getSubjectColor = (subjectName: string, useLighterShade: boolean): string => {
+                  const name = subjectName.toLowerCase()
+                  // Science subjects - Green
+                  if (name.includes('biologi') || name.includes('fysikk') || name.includes('kjemi') || 
+                      name.includes('geofag') || name.includes('matematikk')) {
+                    return useLighterShade ? '#d9f0d9' : '#a8d5a8'
+                  }
+                  // Sports - Orange
+                  if (name.includes('idrett') || name.includes('friluftsliv')) {
+                    return useLighterShade ? '#ffe4c7' : '#ffc896'
+                  }
+                  // Social sciences/languages - Blue
+                  return useLighterShade ? '#dcecff' : '#b3d9ff'
+                }
+
+                const getSubjectSortRank = (subjectName: string): number => {
+                  const name = subjectName.toLowerCase()
+                  const isScience =
+                    name.includes('biologi') ||
+                    name.includes('fysikk') ||
+                    name.includes('kjemi') ||
+                    name.includes('geofag') ||
+                    name.includes('matematikk')
+                  const isSports = name.includes('idrett') || name.includes('friluftsliv')
+
+                  if (isScience) {
+                    return 0
+                  }
+                  if (isSports) {
+                    return 2
+                  }
+                  // Social sciences and languages are in the middle.
+                  return 1
+                }
+
+                const getDisplaySubjectName = (subjectName: string): string => {
+                  const normalized = normalizeSubjectName(subjectName)
+                  const lower = subjectName.toLowerCase()
+
+                  if (lower.includes('entreprenørskap og bedriftsutvikling') || lower.includes('entreprenorskap og bedriftsutvikling')) {
+                    const levelMatch = subjectName.match(/([12])\s*$/u)
+                    return levelMatch ? `Entreprenørskap ${levelMatch[1]}` : 'Entreprenørskap'
+                  }
+                  if (lower.includes('markedsføring og ledelse') || lower.includes('markedsforing og ledelse')) {
+                    const levelMatch = subjectName.match(/([12])\s*$/u)
+                    return levelMatch ? `Markedsføring ${levelMatch[1]}` : 'Markedsføring'
+                  }
+                  if (normalized === 'internasjonal engelsk, skriftlig') {
+                    return 'Engelsk 1'
+                  }
+                  if (normalized === 'samfunnsfaglig engelsk, skriftlig') {
+                    return 'Engelsk 2'
+                  }
+                  if (normalized === 'sosiologi og sosialantropologi') {
+                    return 'Sosiologi'
+                  }
+
+                  return subjectName
+                }
+
+                const formatSubjectLabel = (subjectName: string): string => {
+                  const normalized = subjectName.trim()
+                  if (normalized.length <= 10) {
+                    return normalized
+                  }
+
+                  const trailingLevel = normalized.match(/([12])\s*$/u)
+                  if (trailingLevel) {
+                    const suffix = ` ${trailingLevel[1]}`
+                    const prefixLength = Math.max(1, 10 - suffix.length)
+                    const prefix = normalized.slice(0, prefixLength).trimEnd()
+                    return `${prefix}${suffix}`
+                  }
+
+                  return normalized.slice(0, 10)
+                }
+
+                const normalizeSubjectName = (value: string): string =>
+                  value
+                    .toLowerCase()
+                    .normalize('NFD')
+                    .replace(/[\u0300-\u036f]/g, '')
+                    .replace(/\s+/g, ' ')
+                    .trim()
+
+                const vg3OnlySubjects = new Set<string>([
+                  'biologi 2',
+                  'fransk niva iii',
+                  'fysikk 2',
+                  'geofag 2',
+                  'kjemi 2',
+                  'markedsforing og ledelse 2',
+                  'matematikk r2',
+                  'matematikk s2',
+                  'politikk og menneskerettigheter',
+                  'psykologi 2',
+                  'rettslaere 2',
+                  'samfunnsfaglig engelsk',
+                  'samfunnsokonomi 2',
+                  'spansk niva iii',
+                  'toppidrett 3',
+                  'tysk niva iii',
+                ])
+
+                const isVg3OnlySubject = (subjectName: string): boolean =>
+                  vg3OnlySubjects.has(normalizeSubjectName(subjectName))
+
+                // Only show blokkfag in Bytteoversikt and its options.
+                const allSubjects = (parsedData?.subjects || [])
+                  .filter((subject) => Array.isArray(subject.blocks) && subject.blocks.length > 0)
+                  .filter((subject) => subject.blocks.some((block) => !block.toLowerCase().includes('matte')))
+                  .slice()
+                  .sort((a, b) => a.name.localeCompare(b.name))
+
+                // Get all unique blocks from all subjects, sorted numerically
+                const allBlocks = Array.from(
+                  new Set(allSubjects.flatMap(s => s.blocks || []))
+                )
+                .filter(block => !block.toLowerCase().includes('matte')) // Hide matte block
+                .sort((a, b) => {
+                  const numA = parseInt(a)
+                  const numB = parseInt(b)
+                  if (!isNaN(numA) && !isNaN(numB)) {
+                    return numA - numB
+                  }
+                  return a.localeCompare(b)
+                })
+                
+                const renderBlockRows = (section: 'vg2' | 'vg3') => (
+                  <>
+                    {allBlocks
+                      .filter((block) => {
+                        const normalized = block.trim().toLowerCase()
+                        const blockNumberMatch = normalized.match(/(?:blokk\s*)?(\d+)/u)
+                        const blockNumber = blockNumberMatch ? blockNumberMatch[1] : normalized
+
+                        if (section === 'vg2' && blockNumber === '4') {
+                          return false
+                        }
+                        if (section === 'vg3' && blockNumber === '1') {
+                          return false
+                        }
+                        return true
+                      })
+                      .map((block) => {
+                      // Find all subjects that have this block
+                      const subjectsInBlock = allSubjects
+                        .filter((subject) => subject.blocks && subject.blocks.includes(block))
+                        .filter((subject) => (section === 'vg2' ? !isVg3OnlySubject(subject.name) : true))
+                        .filter((subject) => (bytteSubjectVisibility[subject.code]?.[section] ?? true))
+                        .sort((a, b) => {
+                          const rankDiff = getSubjectSortRank(a.name) - getSubjectSortRank(b.name)
+                          if (rankDiff !== 0) {
+                            return rankDiff
+                          }
+                          return a.name.localeCompare(b.name)
+                        })
+
+                      return (
+                        <div key={block} style={{
+                          display: 'grid',
+                          gridTemplateColumns: '100px 1fr',
+                          gap: '8px',
+                          marginBottom: '8px',
+                          alignItems: 'start'
+                        }}>
+                          <div style={{
+                            backgroundColor: '#b0b0b0',
+                            padding: '6px',
+                            fontWeight: 'bold',
+                            textAlign: 'center',
+                            minHeight: '50px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: '0.85rem'
+                          }}>
+                            {block.toLowerCase().startsWith('blokk') ? block : `Blokk ${block}`}
+                          </div>
+                          <div style={{
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            gap: '6px',
+                            alignContent: 'start'
+                          }}>
+                            {subjectsInBlock.map((subject) => (
+                              <div
+                                key={subject.code}
+                                style={{
+                                  border: '2px solid #333',
+                                  padding: '6px 10px',
+                                  backgroundColor: getSubjectColor(subject.name, !isVg3OnlySubject(subject.name)),
+                                  minWidth: '80px',
+                                  minHeight: '40px',
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  justifyContent: 'center'
+                                }}
+                              >
+                                <div style={{ fontWeight: 'bold', fontSize: '0.75rem', lineHeight: 1.2 }}>
+                                  {getDisplaySubjectName(subject.name)}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </>
+                )
+
+                return (
+                  <div>
+                    <div style={{ marginBottom: '0.75rem', border: '1px solid #d0d7de', borderRadius: '8px', padding: '0.5rem' }}>
+                      <h3 
+                        style={{ 
+                          marginTop: 0, 
+                          marginBottom: bytteOptionsExpanded ? '0.5rem' : 0, 
+                          cursor: 'pointer',
+                          userSelect: 'none',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '0.5rem'
+                        }}
+                        onClick={() => setBytteOptionsExpanded(!bytteOptionsExpanded)}
+                      >
+                        <span style={{ fontSize: '0.9rem' }}>{bytteOptionsExpanded ? '▼' : '▶'}</span>
+                        Options
+                      </h3>
+                      {bytteOptionsExpanded && (
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(128px, 1fr))', gap: '0.4rem', maxHeight: '220px', overflowY: 'auto' }}>
+                          {allSubjects.map((subject) => {
+                            const visibility = bytteSubjectVisibility[subject.code] ?? { vg2: true, vg3: true }
+                            const isVg3Only = isVg3OnlySubject(subject.name)
+                            return (
+                              <div key={`${subject.code}-row`} style={{ border: '1px solid #d0d7de', borderRadius: '6px', padding: '0.35rem 0.4rem', backgroundColor: '#fff' }}>
+                                <div style={{ fontSize: '0.78rem', fontWeight: 600, marginBottom: '0.3rem', lineHeight: 1.2 }}>
+                                  {formatSubjectLabel(getDisplaySubjectName(subject.name))}
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: isVg3Only ? '1fr' : '1fr 1fr', gap: '0.25rem' }}>
+                                  {!isVg3Only && (
+                                    <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.2rem', fontSize: '0.72rem' }}>
+                                      <input
+                                        type="checkbox"
+                                        checked={visibility.vg2}
+                                        onChange={(event) => {
+                                          const checked = event.target.checked
+                                          setBytteSubjectVisibility((previous) => ({
+                                            ...previous,
+                                            [subject.code]: {
+                                              ...(previous[subject.code] ?? { vg2: true, vg3: true }),
+                                              vg2: checked,
+                                            },
+                                          }))
+                                        }}
+                                      />
+                                      VG2
+                                    </label>
+                                  )}
+                                  <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.2rem', fontSize: '0.72rem' }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={visibility.vg3}
+                                      onChange={(event) => {
+                                        const checked = event.target.checked
+                                        setBytteSubjectVisibility((previous) => ({
+                                          ...previous,
+                                          [subject.code]: {
+                                            ...(previous[subject.code] ?? { vg2: true, vg3: true }),
+                                            vg3: checked,
+                                          },
+                                        }))
+                                      }}
+                                    />
+                                    VG3
+                                  </label>
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
+                    <h3 style={{ marginBottom: '0.75rem' }}>VG2</h3>
+                    {renderBlockRows('vg2')}
+                    <h3 style={{ marginTop: '1.5rem', marginBottom: '0.75rem' }}>VG3</h3>
+                    {renderBlockRows('vg3')}
+                  </div>
+                )
+              })()}
+            </section>
           )}
 
           {showStudentAddSubjectDialog && selectedStudent && (
@@ -4014,6 +4552,22 @@ function App() {
                           groupBreakdowns,
                           blockBreakdowns,
                         })
+
+                        appendManualBalanceHistoryRun(
+                          [
+                            {
+                              studentId: selectedStudent.id,
+                              studentName: selectedStudent.fullName,
+                              subjectCode: studentAddSubjectCode,
+                              subjectName: targetSubject.name,
+                              fromGroupCode: '',
+                              fromBlock: '',
+                              toGroupCode: groupCode,
+                              toBlock: block,
+                            },
+                          ],
+                          `${targetSubject.name} (${groupCode}) lagt til for ${selectedStudent.fullName}`,
+                        )
 
                         setBalanceMessage(`${targetSubject.name} (${groupCode}) lagt til for ${selectedStudent.fullName}`)
                         setShowStudentAddSubjectDialog(false)
