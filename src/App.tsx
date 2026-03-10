@@ -3400,7 +3400,7 @@ function App() {
                                       blockBreakdowns,
                                     })
 
-                                    appendManualBalanceHistoryRun(
+                                    appendBalanceHistoryRun(
                                       [
                                         {
                                           studentId: selectedStudent.id,
@@ -3943,7 +3943,7 @@ function App() {
                             }
                             setParsedData(updatedData)
 
-                            appendManualBalanceHistoryRun(
+                            appendBalanceHistoryRun(
                               manualChanges,
                               `Masseoppdatering: ${manualChanges.length} elever flyttet til ${targetSubject.name} (${smallestGroup.groupCode}) i ${massUpdateTargetBlock}`,
                             )
@@ -4034,7 +4034,7 @@ function App() {
                             }
                             setParsedData(updatedData)
 
-                            appendManualBalanceHistoryRun(
+                            appendBalanceHistoryRun(
                               manualChanges,
                               `Masseoppdatering: ${manualChanges.length} elever fjernet fra ${oldSubjectName} (${oldGroupCode}) i ${oldBlock}`,
                             )
@@ -4804,7 +4804,7 @@ function App() {
                           blockBreakdowns,
                         })
 
-                        appendManualBalanceHistoryRun(
+                        appendBalanceHistoryRun(
                           [
                             {
                               studentId: selectedStudent.id,
