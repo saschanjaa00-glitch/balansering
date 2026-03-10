@@ -19,7 +19,6 @@
   font-size: clamp(1.45rem, 2vw, 2.05rem);
   letter-spacing: 0.01em;
 }
-
 .hero-tag {
   margin: 0;
   color: var(--ink-3);
@@ -54,6 +53,13 @@
   animation: rise-in 320ms ease-out;
 }
 
+.upload-actions-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
 .file-label {
   display: block;
   font-weight: 700;
@@ -62,18 +68,39 @@
 }
 
 #novaschem-file {
-  width: 100%;
-  border: 1px dashed #94a8be;
+  flex: 1 1 420px;
+  min-width: 280px;
+  border: 1px solid #cdd9e7;
   border-radius: 12px;
-  padding: 0.95rem;
-  background: #f8fbff;
+  padding: 0.42rem 0.5rem;
+  background: linear-gradient(180deg, #fbfdff, #f2f7fd);
+  color: #29415f;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+#novaschem-file::file-selector-button {
+  margin-right: 0.75rem;
+  border: 1px solid #18498f;
+  border-radius: 10px;
+  padding: 0.56rem 0.9rem;
+  background: linear-gradient(180deg, #2d72d2, #1f5eb8);
+  color: #f8fbff;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+#novaschem-file::file-selector-button:hover {
+  background: linear-gradient(180deg, #2767c2, #194f9d);
+  border-color: #153d77;
+  transform: translateY(-1px);
 }
 
 .storage-controls {
-  margin-top: 0.65rem;
   display: flex;
   gap: 0.45rem;
   flex-wrap: wrap;
+  align-items: stretch;
 }
 
 .storage-button {
@@ -82,6 +109,7 @@
   border: 1px solid #c2d0df;
   padding: 0.46rem 0.72rem;
   font-size: 0.88rem;
+  white-space: nowrap;
 }
 
 .storage-button:hover {
@@ -116,24 +144,32 @@
 }
 
 .stats-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 0.65rem;
-  margin-top: 0.8rem;
+  display: flex;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+  flex-wrap: wrap;
 }
 
 .stats-grid article {
   border: 1px solid #d7e1ee;
-  border-radius: 12px;
+  border-radius: 999px;
   background: #fbfdff;
-  padding: 0.68rem 0.78rem;
-  display: grid;
-  gap: 0.1rem;
+  padding: 0.32rem 0.62rem;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.38rem;
+  white-space: nowrap;
 }
 
 .stats-grid strong {
   color: #12355b;
-  font-size: 1.32rem;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.stats-grid span {
+  color: #4f6280;
+  font-size: 0.84rem;
 }
 
 .controls-row {
@@ -259,6 +295,13 @@ button {
   color: #f8fbff;
 }
 
+.switch-group button.active:hover,
+.filter-button.active:hover {
+  background: #18498f;
+  border-color: #123a72;
+  color: #f8fbff;
+}
+
 .filter-button:disabled {
   opacity: 0.38;
   cursor: not-allowed;
@@ -373,20 +416,24 @@ button {
 }
 
 .balance-results {
-  padding: 0.86rem;
+  padding: 0.72rem;
   margin-bottom: 0.85rem;
   background: #fbfdff;
 }
 
 .balance-results h3 {
-  margin: 0 0 0.7rem;
+  margin: 0 0 0.5rem;
   color: var(--ink-2);
   font-size: 1rem;
 }
 
+.subject-actions-under-results {
+  margin: 0 0 0.85rem;
+}
+
 .balance-message {
-  margin: 0 0 0.7rem;
-  padding: 0.55rem 0.65rem;
+  margin: 0 0 0.55rem;
+  padding: 0.42rem 0.56rem;
   border-radius: 8px;
   border-left: 3px solid #1f5eb8;
   background: #eef5ff;
@@ -395,12 +442,12 @@ button {
 }
 
 .balance-message-panel {
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.6rem;
 }
 
 .balance-message-toggle {
   margin-top: -0.2rem;
-  margin-bottom: 0.55rem;
+  margin-bottom: 0.4rem;
   padding: 0;
   border: none;
   background: transparent;
@@ -425,7 +472,7 @@ button {
   justify-content: space-between;
   align-items: baseline;
   gap: 0.75rem;
-  padding: 0.45rem 0.65rem;
+  padding: 0.34rem 0.54rem;
   border-top: 1px solid #eef3f9;
   font-size: 0.85rem;
   color: #39506f;
@@ -447,13 +494,13 @@ button {
   overflow-y: auto;
   border: 1px solid #dbe5f2;
   border-radius: 10px;
-  padding: 0.5rem;
+  padding: 0.36rem;
   background: #ffffff;
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.6rem;
 }
 
 .balance-item {
-  padding: 0.52rem;
+  padding: 0.38rem 0.4rem;
   border-bottom: 1px solid #e7edf6;
   font-size: 0.9rem;
   color: var(--ink-2);
@@ -498,8 +545,8 @@ button {
 }
 
 .balance-run-segment {
-  margin-top: 0.45rem;
-  padding-top: 0.45rem;
+  margin-top: 0.34rem;
+  padding-top: 0.34rem;
   border-top: 1px solid #edf2f8;
 }
 
@@ -509,8 +556,8 @@ button {
 }
 
 .balance-subject-group {
-  margin-top: 0.5rem;
-  padding-top: 0.45rem;
+  margin-top: 0.34rem;
+  padding-top: 0.34rem;
   margin-left: 1rem;
   border-top: 1px solid #eef3f9;
 }
@@ -531,9 +578,9 @@ button {
 }
 
 .balance-change-line {
-  margin-top: 0.3rem;
+  margin-top: 0.2rem;
   font-size: 0.95rem;
-  padding: 0.18rem 0.4rem;
+  padding: 0.14rem 0.32rem;
   border-radius: 6px;
   border-left: 3px solid transparent;
   display: flex;
@@ -706,14 +753,14 @@ button {
 table {
   width: 100%;
   border-collapse: collapse;
-  margin-top: 0.6rem;
+  margin-top: 0.45rem;
   font-size: 0.9rem;
 }
 
 th,
 td {
   border-bottom: 1px solid #e3eaf5;
-  padding: 0.48rem 0.42rem;
+  padding: 0.34rem 0.36rem;
   text-align: left;
   vertical-align: top;
 }
@@ -735,7 +782,7 @@ th {
 }
 
 .per-faggruppe-toolbar {
-  margin: 0.3rem 0 0.45rem;
+  margin: 0.2rem 0 0.34rem;
   display: flex;
   align-items: center;
   gap: 0.55rem;
@@ -957,6 +1004,15 @@ th {
 @media (max-width: 760px) {
   .app-shell {
     padding: 0.85rem 0.65rem 1.25rem;
+  }
+
+  .upload-actions-row {
+    align-items: stretch;
+  }
+
+  #novaschem-file {
+    min-width: 0;
+    width: 100%;
   }
 
   .secondary-controls-row {

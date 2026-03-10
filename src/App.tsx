@@ -2862,6 +2862,41 @@ function App() {
       })
   }, [parsedData, subjectQuery, blockFilter, onlyBlokkfag])
 
+  const blokkoversiktBlocksBySubject = useMemo(() => {
+    const bySubject = new Map<string, Set<string>>()
+
+    if (!parsedData) {
+      return bySubject
+    }
+
+    Object.values(parsedData.initialAssignmentKeysByStudent).forEach((assignmentKeys) => {
+      assignmentKeys.forEach((key) => {
+        const { subjectCode, block } = parseAssignmentKey(key)
+        if (!subjectCode || !block) {
+          return
+        }
+
+        if (!bySubject.has(subjectCode)) {
+          bySubject.set(subjectCode, new Set<string>())
+        }
+        bySubject.get(subjectCode)?.add(block)
+      })
+    })
+
+    parsedData.groupBreakdowns.forEach((group) => {
+      if (!group.subjectCode || !group.block) {
+        return
+      }
+
+      if (!bySubject.has(group.subjectCode)) {
+        bySubject.set(group.subjectCode, new Set<string>())
+      }
+      bySubject.get(group.subjectCode)?.add(group.block)
+    })
+
+    return bySubject
+  }, [parsedData])
+
   const perSubjectBlockColumns = useMemo(() => {
     if (!parsedData) {
       return [] as string[]
@@ -3443,11 +3478,13 @@ function App() {
         <label htmlFor="novaschem-file" className="file-label">
           Velg Novaschem TXT-fil
         </label>
-        <input id="novaschem-file" ref={fileInputRef} type="file" accept=".txt" onChange={handleFileUpload} />
-        <div className="storage-controls">
+        <div className="upload-actions-row">
+          <input id="novaschem-file" ref={fileInputRef} type="file" accept=".txt" onChange={handleFileUpload} />
+          <div className="storage-controls">
           <button type="button" onClick={clearStoredData} className="storage-button danger">
             Tøm lagret data
           </button>
+          </div>
         </div>
         {errorMessage && <p className="error-text">{errorMessage}</p>}
         {parsedData && (
@@ -3511,6 +3548,13 @@ function App() {
               </button>
               <button type="button" className="clear-results-button history-button" onClick={handleRedo} disabled={redoStack.length === 0}>
                 Redo ({redoStack.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowProgressiveBalanceDialog(true)}
+                className="balance-button"
+              >
+                Progressiv balansering
               </button>
               <button type="button" className="export-button" onClick={handleExport}>
                 Eksporter TXT
@@ -3794,22 +3838,6 @@ function App() {
             <section className="subject-panel">
               <div className="subject-view-header">
                 <h2>Fagvisning</h2>
-                <div>
-                  <button
-                    type="button"
-                    onClick={() => setShowAddSubjectDialog(true)}
-                    className="balance-button"
-                  >
-                    Legg til fag
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowProgressiveBalanceDialog(true)}
-                    className="balance-button"
-                  >
-                    Progressiv balansering
-                  </button>
-                </div>
               </div>
 
               {(balanceResults !== null || balanceHistory.length > 0) && (
@@ -3956,6 +3984,16 @@ function App() {
                   </button>
                 </div>
               )}
+
+              <div className="subject-actions-under-results">
+                <button
+                  type="button"
+                  onClick={() => setShowAddSubjectDialog(true)}
+                  className="balance-button"
+                >
+                  Legg til fag
+                </button>
+              </div>
 
               <h2>Per blokk</h2>
               <div className="block-summary-grid">
@@ -4744,7 +4782,17 @@ function App() {
                     .slice()
                     .sort((a, b) => a.name.localeCompare(b.name))
                     .map((subject) => {
-                      const sortedBlocks = sortBlocks([...subject.blocks])
+                      const sortedBlocks = sortBlocks(
+                        Array.from(blokkoversiktBlocksBySubject.get(subject.code) || new Set<string>()),
+                      )
+
+                      if (blockFilter && !sortedBlocks.includes(blockFilter)) {
+                        return null
+                      }
+
+                      if (onlyBlokkfag && sortedBlocks.length === 0) {
+                        return null
+                      }
 
                       return (
                         <tr key={`${subject.code}-blokkoversikt`}>
