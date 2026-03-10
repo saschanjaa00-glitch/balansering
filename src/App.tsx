@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { jsPDF } from 'jspdf'
 import './App.css'
 
 type SourceTable = {
@@ -3428,6 +3429,159 @@ function App() {
     }
   }
 
+  const handleExportBlokkvalgPdf = (section: 'vg2' | 'vg3'): void => {
+    if (!parsedData) {
+      setErrorMessage('Ingen data tilgjengelig for PDF-eksport.')
+      return
+    }
+
+    const normalizeSubjectName = (value: string): string =>
+      value
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+
+    const vg3OnlySubjects = new Set<string>([
+      'biologi 2',
+      'fransk niva iii',
+      'fysikk 2',
+      'geofag 2',
+      'kjemi 2',
+      'markedsforing og ledelse 2',
+      'matematikk r2',
+      'matematikk s2',
+      'politikk og menneskerettigheter',
+      'psykologi 2',
+      'rettslaere 2',
+      'samfunnsfaglig engelsk',
+      'samfunnsokonomi 2',
+      'spansk niva iii',
+      'toppidrett 3',
+      'tysk niva iii',
+    ])
+
+    const isVg3OnlySubject = (subjectName: string): boolean =>
+      vg3OnlySubjects.has(normalizeSubjectName(subjectName))
+
+    const allSubjects = parsedData.subjects
+      .filter((subject) => Array.isArray(subject.blocks) && subject.blocks.length > 0)
+      .filter((subject) => subject.blocks.some((block) => !block.toLowerCase().includes('matte')))
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name, 'nb-NO'))
+
+    const allBlocks = Array.from(new Set(allSubjects.flatMap((subject) => subject.blocks || [])))
+      .filter((block) => !block.toLowerCase().includes('matte'))
+      .sort((a, b) => {
+        const numA = parseInt(a, 10)
+        const numB = parseInt(b, 10)
+        if (!Number.isNaN(numA) && !Number.isNaN(numB)) {
+          return numA - numB
+        }
+        return a.localeCompare(b, 'nb-NO')
+      })
+
+    const rows = allBlocks
+      .filter((block) => {
+        const normalized = block.trim().toLowerCase()
+        const blockNumberMatch = normalized.match(/(?:blokk\s*)?(\d+)/u)
+        const blockNumber = blockNumberMatch ? blockNumberMatch[1] : normalized
+
+        if (section === 'vg2' && blockNumber === '4') {
+          return false
+        }
+        if (section === 'vg3' && blockNumber === '1') {
+          return false
+        }
+        return true
+      })
+      .map((block) => {
+        const subjectNames = allSubjects
+          .filter((subject) => subject.blocks.includes(block))
+          .filter((subject) => (section === 'vg2' ? !isVg3OnlySubject(subject.name) : true))
+          .filter((subject) => (bytteSubjectVisibility[subject.code]?.[section] ?? true))
+          .map((subject) => formatSubjectDisplayName(subject.name))
+          .sort((a, b) => a.localeCompare(b, 'nb-NO'))
+
+        return {
+          block,
+          subjectNames,
+        }
+      })
+      .filter((row) => row.subjectNames.length > 0)
+
+    if (rows.length === 0) {
+      setErrorMessage(`Ingen synlige ${section.toUpperCase()}-blokker å eksportere.`)
+      return
+    }
+
+    const now = new Date()
+    const timestamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
+    const title = `Blokkvalg ${section.toUpperCase()}`
+
+    const doc = new jsPDF({
+      orientation: 'landscape',
+      unit: 'mm',
+      format: 'a4',
+    })
+
+    const pageWidth = doc.internal.pageSize.getWidth()
+    const pageHeight = doc.internal.pageSize.getHeight()
+    const margin = 10
+    const blockColumnWidth = 30
+    const subjectColumnX = margin + blockColumnWidth + 3
+    const maxSubjectWidth = pageWidth - margin - subjectColumnX
+
+    let y = margin
+    doc.setFont('helvetica', 'bold')
+    doc.setFontSize(16)
+    doc.text(title, margin, y)
+    y += 6
+
+    doc.setFont('helvetica', 'normal')
+    doc.setFontSize(9)
+    doc.text(`Generert ${formatTimestamp(now.toISOString())}`, margin, y)
+    y += 6
+
+    doc.setFont('helvetica', 'bold')
+    doc.setFontSize(10)
+    doc.text('Blokk', margin, y)
+    doc.text('Fag', subjectColumnX, y)
+    y += 4
+    doc.line(margin, y, pageWidth - margin, y)
+    y += 4
+
+    rows.forEach((row) => {
+      if (y > pageHeight - margin) {
+        doc.addPage()
+        y = margin
+      }
+
+      const blockLabel = row.block.toLowerCase().startsWith('blokk') ? row.block : `Blokk ${row.block}`
+      const subjectLine = row.subjectNames.join(' | ')
+
+      doc.setFont('helvetica', 'bold')
+      doc.setFontSize(9)
+      doc.text(blockLabel, margin, y)
+
+      // Keep one row per block by shrinking text to fit width when needed.
+      doc.setFont('helvetica', 'normal')
+      let fontSize = 9
+      doc.setFontSize(fontSize)
+      while (fontSize > 5 && doc.getTextWidth(subjectLine) > maxSubjectWidth) {
+        fontSize -= 0.5
+        doc.setFontSize(fontSize)
+      }
+      doc.text(subjectLine, subjectColumnX, y)
+
+      y += 5
+    })
+
+    doc.save(`blokkvalg-${section}-${timestamp}.pdf`)
+    setErrorMessage('')
+  }
+
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
     const file = event.target.files?.[0]
     if (!file) {
@@ -5045,6 +5199,14 @@ function App() {
 
                 return (
                   <div>
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
+                      <button type="button" className="clear-results-button" onClick={() => handleExportBlokkvalgPdf('vg2')}>
+                        Eksporter VG2 PDF (A4 liggende)
+                      </button>
+                      <button type="button" className="clear-results-button" onClick={() => handleExportBlokkvalgPdf('vg3')}>
+                        Eksporter VG3 PDF (A4 liggende)
+                      </button>
+                    </div>
                     <div style={{ marginBottom: '0.75rem', border: '1px solid #d0d7de', borderRadius: '8px', padding: '0.5rem' }}>
                       <h3 
                         style={{ 
