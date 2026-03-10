@@ -394,6 +394,54 @@ button {
   font-size: 0.9rem;
 }
 
+.balance-message-panel {
+  margin-bottom: 0.75rem;
+}
+
+.balance-message-toggle {
+  margin-top: -0.2rem;
+  margin-bottom: 0.55rem;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #315f9f;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.balance-message-toggle:hover {
+  text-decoration: underline;
+}
+
+.balance-message-history {
+  border: 1px solid #dbe5f2;
+  border-radius: 10px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.balance-message-history-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.45rem 0.65rem;
+  border-top: 1px solid #eef3f9;
+  font-size: 0.85rem;
+  color: #39506f;
+}
+
+.balance-message-history-item:first-child {
+  border-top: none;
+}
+
+.balance-message-history-item span:last-child {
+  flex-shrink: 0;
+  white-space: nowrap;
+  color: #687c98;
+  font-size: 0.78rem;
+}
+
 .balance-list {
   max-height: 300px;
   overflow-y: auto;

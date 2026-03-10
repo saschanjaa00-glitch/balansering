@@ -2328,6 +2328,7 @@ function App() {
       : []
   })
   const [balanceMessage, setBalanceMessage] = useState<string>('')
+  const [showBalanceMessageHistory, setShowBalanceMessageHistory] = useState<boolean>(false)
   const [debugGroups, setDebugGroups] = useState<Array<{ key: string; count: number; maxCap: number; status: string }>>([])
   const [balanceDeltaCounts, setBalanceDeltaCounts] = useState<Map<string, number>>(new Map())
   const [balanceBlockDeltaCounts, setBalanceBlockDeltaCounts] = useState<Map<string, number>>(new Map())
@@ -3053,9 +3054,33 @@ function App() {
     return Array.from(grouped.values()).sort((a, b) => a.studentName.localeCompare(b.studentName, 'nb-NO'))
   }, [balanceHistory, parsedData])
 
+  const balanceSummaryHistory = useMemo(() => {
+    return balanceHistory.filter((run) => run.message.trim().length > 0)
+  }, [balanceHistory])
+
+  const latestBalanceSummary = balanceSummaryHistory.length > 0
+    ? balanceSummaryHistory[balanceSummaryHistory.length - 1]
+    : null
+
+  const allCollisionErrors = useMemo(() => {
+    const errors: CollisionError[] = []
+    const seenIds = new Set<string>()
+
+    for (const run of [...balanceHistory].reverse()) {
+      for (const err of run.collisionErrors ?? []) {
+        if (!seenIds.has(err.studentId)) {
+          seenIds.add(err.studentId)
+          errors.push(err)
+        }
+      }
+    }
+
+    return errors
+  }, [balanceHistory])
+
   const appendBalanceHistoryRun = (changes: BalanceChange[], message: string, collisionErrors?: CollisionError[]): void => {
     const summarized = summarizeBalanceChanges(changes)
-    if (summarized.length === 0 && (!collisionErrors || collisionErrors.length === 0)) {
+    if (summarized.length === 0 && (!collisionErrors || collisionErrors.length === 0) && message.trim().length === 0) {
       return
     }
 
@@ -3117,7 +3142,7 @@ function App() {
   }
 
   const handleExportBalanceResultsWord = (): void => {
-    if (balanceHistoryByStudent.length === 0) {
+    if (balanceHistory.length === 0 && allCollisionErrors.length === 0) {
       setErrorMessage('Ingen balanseringsresultater a eksportere enda.')
       return
     }
@@ -3126,26 +3151,57 @@ function App() {
     const timestampForFile = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
     const fileName = `balanseringsresultater-${timestampForFile}.doc`
 
-    const bodyRows = balanceHistoryByStudent
-      .map((student) => {
-        const runHtml = student.runs
-          .map((run) => {
-            const lines = run.changes
-              .map((change) => {
-                const subjectName = escapeHtml(change.subjectName || change.subjectCode)
-                const changeText = escapeHtml(formatBalanceChangeText(change))
-                return `<li><strong>${subjectName}</strong>: ${changeText}</li>`
-              })
+    const collisionRows = allCollisionErrors.length > 0
+      ? `<section><h2>Uløsbare blokk-kollisjoner</h2><p class="intro">Disse elevene har valgt fag som ikke kan plasseres i ulike blokker med gjeldende gruppetilbud. Manuell overstyring er nødvendig.</p>${allCollisionErrors
+          .map((err) => {
+            const subjectRows = err.subjects
+              .map((subject) => `<li>${escapeHtml(formatSubjectDisplayName(subject.subjectName || subject.subjectCode))} (${escapeHtml(subject.block)})</li>`)
               .join('')
-            return `<div class="run"><div class="run-head"><span>${escapeHtml(formatTimestamp(run.createdAt))}</span></div><ul>${lines}</ul></div>`
+
+            return `<div class="collision-item"><div class="student-title"><strong>${escapeHtml(err.studentName)}</strong> (${escapeHtml(err.classGroup || '-')}) (${escapeHtml(err.studentId)})</div><ul>${subjectRows}</ul></div>`
+          })
+          .join('')}</section>`
+      : ''
+
+    const studentRows = balanceHistoryByStudent
+      .map((student) => {
+        const finalSubjectsSummary = student.finalSubjectsSummary
+          .map((item) => `<span class="final-subject"><strong>${escapeHtml(item.blockNumber)}:</strong> ${escapeHtml(item.subjects)}</span>`)
+          .join(' ')
+
+        const netChanges = summarizeBalanceChanges(student.runs.flatMap((run) => run.changes))
+          .sort((a, b) => {
+            const subjectNameCmp = formatSubjectDisplayName(a.subjectName || a.subjectCode).localeCompare(
+              formatSubjectDisplayName(b.subjectName || b.subjectCode),
+              'nb-NO',
+            )
+            if (subjectNameCmp !== 0) {
+              return subjectNameCmp
+            }
+            return a.subjectCode.localeCompare(b.subjectCode)
+          })
+
+        const subjectHtml = netChanges
+          .map((change) => {
+            const isAdded = !change.fromGroupCode.trim() && !change.fromBlock.trim() && (change.toGroupCode.trim() || change.toBlock.trim())
+            const isRemoved = !change.toGroupCode.trim() && !change.toBlock.trim() && (change.fromGroupCode.trim() || change.fromBlock.trim())
+            const lineClass = isAdded ? 'change-added' : isRemoved ? 'change-removed' : 'change-moved'
+
+            return `<div class="change-line ${lineClass}"><span class="change-main"><strong>${escapeHtml(formatSubjectDisplayName(change.subjectName || change.subjectCode))}</strong>: ${escapeHtml(formatBalanceChangeText(change))}</span></div>`
           })
           .join('')
 
-        return `<section class="student"><h3>${escapeHtml(student.studentName)} (${escapeHtml(student.studentId)})</h3>${runHtml}</section>`
+        return `<section class="student"><h3>${escapeHtml(student.studentName)} (${escapeHtml(student.classGroup || '-')}) (${escapeHtml(student.studentId)})</h3>${finalSubjectsSummary ? `<div class="student-final-subjects">${finalSubjectsSummary}</div>` : ''}<div class="student-change-block">${subjectHtml}</div><div class="student-spacer">&nbsp;</div></section>`
       })
       .join('')
 
-    const htmlDocument = `<!doctype html><html><head><meta charset="utf-8"><title>Balanseringsresultater</title><style>body{font-family:Calibri,Arial,sans-serif;font-size:11pt;color:#1f2b3d;margin:24px;}h1{font-size:18pt;margin:0 0 12px;}h3{font-size:12pt;margin:14px 0 8px;padding-bottom:4px;border-bottom:1px solid #d9e3f0;}.student{margin-bottom:14px;}.run{padding:6px 0;border-top:1px solid #e7edf6;}.run:first-of-type{border-top:none;}.run-head{display:flex;justify-content:space-between;font-size:9pt;color:#506480;margin-bottom:3px;}ul{margin:0;padding-left:18px;}li{margin:2px 0;}</style></head><body><h1>Balanseringsresultater</h1>${bodyRows}</body></html>`
+    const summaryHistoryRows = balanceSummaryHistory.length > 0
+      ? `<section><h2>Historikk</h2>${[...balanceSummaryHistory].reverse()
+          .map((run) => `<div class="summary-history-item"><span>${escapeHtml(run.message)}</span><span>${escapeHtml(formatTimestamp(run.createdAt))}</span></div>`)
+          .join('')}</section>`
+      : ''
+
+    const htmlDocument = `<!doctype html><html><head><meta charset="utf-8"><title>Balanseringsresultater</title><style>body{font-family:Calibri,Arial,sans-serif;font-size:11pt;color:#1f2b3d;margin:24px;}h1{font-size:18pt;margin:0 0 14px;}h2{font-size:13pt;margin:18px 0 8px;padding-bottom:4px;border-bottom:1px solid #d9e3f0;}h3{font-size:13pt;margin:0 0 6px;}.intro{margin:0 0 10px;color:#5b6d86;}.student{padding:8px 0;}.collision-item{margin-bottom:10px;padding:8px 10px;border:1px solid #f0c8cc;border-radius:8px;background:#fff5f5;}.student-title{margin-bottom:4px;}.student-final-subjects{margin:0 0 12px 0;color:#425775;}.student-change-block{margin-top:12px;}.student-spacer{height:24pt;line-height:24pt;font-size:1pt;}.change-line{margin-top:5px;padding:4px 7px;border-left:3px solid transparent;border-radius:6px;}.change-main{min-width:0;}.change-moved{background:#eef5ff;border-left-color:#2a63b7;color:#1f3f6c;}.change-added{background:#eaf9f0;border-left-color:#2f8f5b;color:#1f5d3d;}.change-removed{background:#fff1f1;border-left-color:#c45555;color:#7a2c2c;}.final-subject{margin-right:8px;}.summary-history-item{display:flex;justify-content:space-between;gap:10px;padding:6px 8px;border-top:1px solid #eef3f9;color:#39506f;}.summary-history-item:first-of-type{border-top:none;}.summary-history-item span:last-child{flex-shrink:0;color:#687c98;font-size:8.5pt;white-space:nowrap;}ul{margin:4px 0 0;padding-left:18px;}li{margin:2px 0;}</style></head><body><h1>Balanseringsresultater</h1>${collisionRows}${studentRows ? `<section><h2>Elevendringer</h2>${studentRows}</section>` : ''}${summaryHistoryRows}</body></html>`
 
     const blob = new Blob(['\ufeff', htmlDocument], { type: 'application/msword;charset=utf-8' })
     const url = URL.createObjectURL(blob)
@@ -3621,7 +3677,7 @@ function App() {
                 </div>
               </div>
 
-              {(balanceResults !== null || balanceHistoryByStudent.length > 0) && (
+              {(balanceResults !== null || balanceHistory.length > 0) && (
                 <div className="balance-results">
                   <h3>
                     Balanseringsresultater{' '}
@@ -3629,7 +3685,30 @@ function App() {
                       ? `(${balanceHistoryByStudent.length} elev${balanceHistoryByStudent.length === 1 ? '' : 'er'} med historikk)`
                       : ''}
                   </h3>
-                  {balanceMessage && <p className="balance-message">{balanceMessage}</p>}
+                  {latestBalanceSummary && (
+                    <div className="balance-message-panel">
+                      <div className="balance-message">{latestBalanceSummary.message}</div>
+                      {balanceSummaryHistory.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => setShowBalanceMessageHistory((previous) => !previous)}
+                          className="balance-message-toggle"
+                        >
+                          {showBalanceMessageHistory ? 'Skjul historikk' : 'Vis historikk'} ({balanceSummaryHistory.length})
+                        </button>
+                      )}
+                      {showBalanceMessageHistory && (
+                        <div className="balance-message-history">
+                          {[...balanceSummaryHistory].reverse().map((run) => (
+                            <div key={run.id} className="balance-message-history-item">
+                              <span>{run.message}</span>
+                              <span>{formatTimestamp(run.createdAt)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {balanceHistoryByStudent.length > 0 && (
                     <div className="balance-list">
                       {balanceHistoryByStudent.map((student) => (
@@ -3676,43 +3755,30 @@ function App() {
                       Ingen netto fagendringer etter oppsummering av mellomsteg.
                     </p>
                   )}
-                  {(() => {
-                    const allErrors: CollisionError[] = []
-                    const seenIds = new Set<string>()
-                    for (const run of [...balanceHistory].reverse()) {
-                      for (const err of run.collisionErrors ?? []) {
-                        if (!seenIds.has(err.studentId)) {
-                          seenIds.add(err.studentId)
-                          allErrors.push(err)
-                        }
-                      }
-                    }
-                    if (allErrors.length === 0) return null
-                    return (
-                      <div className="collision-error-section">
-                        <strong className="collision-error-heading">
-                          ⚠ Uløsbare blokk-kollisjoner ({allErrors.length} elev{allErrors.length === 1 ? '' : 'er'})
-                        </strong>
-                        <p className="collision-error-desc">
-                          Disse elevene har valgt fag som ikke kan plasseres i ulike blokker med gjeldende gruppetilbud. Manuell overstyring er nødvendig.
-                        </p>
-                        <div className="balance-list">
-                          {allErrors.map((err) => (
-                            <div key={err.studentId} className="balance-item collision-error-item">
-                              <strong>{err.studentName}</strong> ({err.classGroup || '-'}) — {err.studentId}
-                              <ul className="collision-error-subjects">
-                                {err.subjects.map((s) => (
-                                  <li key={`${s.subjectCode}-${s.block}`}>
-                                    {s.subjectName || s.subjectCode} ({s.block})
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
-                          ))}
-                        </div>
+                  {allCollisionErrors.length > 0 && (
+                    <div className="collision-error-section">
+                      <strong className="collision-error-heading">
+                        ⚠ Uløsbare blokk-kollisjoner ({allCollisionErrors.length} elev{allCollisionErrors.length === 1 ? '' : 'er'})
+                      </strong>
+                      <p className="collision-error-desc">
+                        Disse elevene har valgt fag som ikke kan plasseres i ulike blokker med gjeldende gruppetilbud. Manuell overstyring er nødvendig.
+                      </p>
+                      <div className="balance-list">
+                        {allCollisionErrors.map((err) => (
+                          <div key={err.studentId} className="balance-item collision-error-item">
+                            <strong>{err.studentName}</strong> ({err.classGroup || '-'}) — {err.studentId}
+                            <ul className="collision-error-subjects">
+                              {err.subjects.map((s) => (
+                                <li key={`${s.subjectCode}-${s.block}`}>
+                                  {formatSubjectDisplayName(s.subjectName || s.subjectCode)} ({s.block})
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ))}
                       </div>
-                    )
-                  })()}
+                    </div>
+                  )}
                   {balanceResults !== null && balanceResults.length === 0 && debugGroups.length > 0 && (
                     <>
                       <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '0.8rem' }}>
