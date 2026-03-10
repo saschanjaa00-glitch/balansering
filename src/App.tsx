@@ -78,6 +78,7 @@ type ParsedData = {
   sourceDocument: SourceDocument
   initialAssignmentKeysByStudent: Record<string, string[]>
   sourceFileName: string
+  originalAvailableBlocksBySubject: Record<string, string[]>
 }
 
 type BalanceChange = {
@@ -134,6 +135,7 @@ const CUSTOM_SUBJECT_BLOCKS: Record<string, string> = {
   '2MAR5': 'MATTE',
   '2MAP3': 'MATTE',
   '2MAS5': 'MATTE',
+  '3TY5': 'Blokk 1',
 }
 
 const EXCLUDED_GROUPS = new Set<string>([
@@ -562,6 +564,7 @@ function canStudentMoveToBlock(student: StudentRecord, targetBlock: string): boo
 
 function balanceGroupsWithOffset(
   students: StudentRecord[],
+  availableGroups: GroupBreakdownRecord[] = [],
   maxCapacityOffset: number = 0,
   debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void
 ): { changes: BalanceChange[]; overcrowdedCount: number; partnerLookaheadMoves: number } {
@@ -578,18 +581,8 @@ function balanceGroupsWithOffset(
   const LOOKAHEAD_MAX_DEPTH2_STUDENTS = 40
   let lookaheadAttempts = 0
 
-  // Build group occupancy map: key = "subjectCode|groupCode|block", value = [studentIds]
-  const groupOccupancy = new Map<string, string[]>()
-
-  students.forEach((student) => {
-    student.assignments.forEach((assignment) => {
-      const key = `${assignment.subjectCode}|${assignment.groupCode}|${assignment.block}`
-      if (!groupOccupancy.has(key)) {
-        groupOccupancy.set(key, [])
-      }
-      groupOccupancy.get(key)?.push(student.id)
-    })
-  })
+  // Build group occupancy map including empty but available groups.
+  const groupOccupancy = buildGroupOccupancy(students, availableGroups)
 
   // Find overcrowded groups
   const overcrowded: Array<{ key: string; count: number; studentIds: string[] }> = []
@@ -1031,6 +1024,7 @@ function balanceGroupsWithOffset(
 
 function progressiveBalanceGroups(
   students: StudentRecord[],
+  availableGroups: GroupBreakdownRecord[] = [],
   maxOffset: number,
   debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void
 ): { allChanges: BalanceChange[]; summary: string; collisionErrors: CollisionError[] } {
@@ -1048,7 +1042,7 @@ function progressiveBalanceGroups(
   let currentStudents = students
   
   for (const offset of offsets) {
-    const result = balanceGroupsWithOffset(currentStudents, offset, debugCallback)
+    const result = balanceGroupsWithOffset(currentStudents, availableGroups, offset, debugCallback)
     totalPartnerLookaheadMoves += result.partnerLookaheadMoves
 
     // Merge collision errors, keeping only those still unresolved.
@@ -1383,8 +1377,50 @@ function applyBalanceChanges(students: StudentRecord[], changes: BalanceChange[]
   })
 }
 
-function recalculateBreakdowns(students: StudentRecord[]): { groupBreakdowns: GroupBreakdownRecord[]; blockBreakdowns: BlockBreakdownRecord[] } {
+function buildGroupOccupancy(
+  students: StudentRecord[],
+  existingGroups: GroupBreakdownRecord[] = [],
+): Map<string, string[]> {
+  const groupOccupancy = new Map<string, string[]>()
+
+  existingGroups.forEach((group) => {
+    const key = `${group.subjectCode}|${group.groupCode}|${group.block}`
+    if (!groupOccupancy.has(key)) {
+      groupOccupancy.set(key, [])
+    }
+  })
+
+  students.forEach((student) => {
+    student.assignments.forEach((assignment) => {
+      const key = `${assignment.subjectCode}|${assignment.groupCode}|${assignment.block}`
+      if (!groupOccupancy.has(key)) {
+        groupOccupancy.set(key, [])
+      }
+      groupOccupancy.get(key)?.push(student.id)
+    })
+  })
+
+  return groupOccupancy
+}
+
+function recalculateBreakdowns(
+  students: StudentRecord[],
+  existingGroups: GroupBreakdownRecord[] = [],
+): { groupBreakdowns: GroupBreakdownRecord[]; blockBreakdowns: BlockBreakdownRecord[] } {
   const groupSummary = new Map<string, { subjectCode: string; subjectName: string; groupCode: string; block: string; students: Set<string> }>()
+
+  existingGroups.forEach((group) => {
+    const key = `${group.subjectCode}|${group.groupCode}|${group.block}`
+    if (!groupSummary.has(key)) {
+      groupSummary.set(key, {
+        subjectCode: group.subjectCode,
+        subjectName: group.subjectName,
+        groupCode: group.groupCode,
+        block: group.block,
+        students: new Set<string>(),
+      })
+    }
+  })
 
   students.forEach((student) => {
     student.assignments.forEach((assignment) => {
@@ -1846,6 +1882,20 @@ function parseNovaschemExport(rawText: string, sourceFileName: string): ParsedDa
 
   const assignmentsByStudent = new Map<string, Map<string, Assignment>>()
   const taSubjectGroupPairs = new Set<string>()
+  const availableSubjectBlocks = new Map<string, { name: string; blocks: Set<string> }>()
+  const addAvailableSubjectBlock = (subjectCode: string, block: string): void => {
+    if (!subjectCode || !block || EXCLUDED_SUBJECTS.has(subjectCode)) {
+      return
+    }
+    if (!availableSubjectBlocks.has(subjectCode)) {
+      availableSubjectBlocks.set(subjectCode, {
+        name: subjectsByCode.get(subjectCode) || subjectCode,
+        blocks: new Set<string>(),
+      })
+    }
+    availableSubjectBlocks.get(subjectCode)?.blocks.add(block)
+  }
+
   const addAssignment = (studentId: string, assignment: Assignment): void => {
     if (!assignmentsByStudent.has(studentId)) {
       assignmentsByStudent.set(studentId, new Map<string, Assignment>())
@@ -1870,11 +1920,14 @@ function parseNovaschemExport(rawText: string, sourceFileName: string): ParsedDa
 
     const customBlock = getCustomBlock(subjectCode)
     const inferredBlock = customBlock || inferBlockFromSuffix(groupCode) || inferBlockFromSuffix(subjectCode)
+    const blockName = row.Blockname || inferredBlock
+    addAvailableSubjectBlock(subjectCode, blockName)
+
     const assignment: Assignment = {
       subjectCode,
       subjectName: subjectsByCode.get(subjectCode) || subjectCode,
       groupCode,
-      block: row.Blockname || inferredBlock,
+      block: blockName,
     }
 
     taSubjectGroupPairs.add(`${subjectCode}|${groupCode}`)
@@ -1908,6 +1961,8 @@ function parseNovaschemExport(rawText: string, sourceFileName: string): ParsedDa
 
     const customBlock = getCustomBlock(subjectCode)
     const inferredBlock = customBlock || inferBlockFromSuffix(groupCode)
+    addAvailableSubjectBlock(subjectCode, inferredBlock)
+
     const assignment: Assignment = {
       subjectCode,
       subjectName: subjectsByCode.get(subjectCode) || subjectCode,
@@ -1918,6 +1973,27 @@ function parseNovaschemExport(rawText: string, sourceFileName: string): ParsedDa
     studentIds.forEach((studentId) => {
       addAssignment(studentId, assignment)
     })
+  })
+
+  groupRows.forEach((row) => {
+    const groupCode = row.Group
+    if (!groupCode || EXCLUDED_GROUPS.has(groupCode)) {
+      return
+    }
+
+    const suffixMatch = groupCode.match(/^(.+)([A-D])$/u)
+    if (!suffixMatch) {
+      return
+    }
+
+    const subjectCode = suffixMatch[1]
+    if (EXCLUDED_SUBJECTS.has(subjectCode) || !subjectsByCode.has(subjectCode)) {
+      return
+    }
+
+    const customBlock = getCustomBlock(subjectCode)
+    const inferredBlock = customBlock || inferBlockFromSuffix(groupCode)
+    addAvailableSubjectBlock(subjectCode, inferredBlock)
   })
 
   const studentClassMap = new Map<string, string>()
@@ -2004,6 +2080,24 @@ function parseNovaschemExport(rawText: string, sourceFileName: string): ParsedDa
     })
   })
 
+  availableSubjectBlocks.forEach((item, subjectCode) => {
+    if (!subjectSummary.has(subjectCode)) {
+      subjectSummary.set(subjectCode, {
+        code: subjectCode,
+        name: item.name,
+        students: new Set<string>(),
+        blocks: new Set<string>(),
+      })
+    }
+
+    const summary = subjectSummary.get(subjectCode)
+    item.blocks.forEach((block) => {
+      if (block) {
+        summary?.blocks.add(block)
+      }
+    })
+  })
+
   const subjects: SubjectRecord[] = Array.from(subjectSummary.values())
     .map((item) => ({
       code: item.code,
@@ -2079,6 +2173,11 @@ function parseNovaschemExport(rawText: string, sourceFileName: string): ParsedDa
       .sort((a, b) => a.localeCompare(b))
   })
 
+  const originalAvailableBlocksBySubject: Record<string, string[]> = {}
+  availableSubjectBlocks.forEach((item, subjectCode) => {
+    originalAvailableBlocksBySubject[subjectCode] = sortBlocks(Array.from(item.blocks))
+  })
+
   return {
     students,
     subjects,
@@ -2089,6 +2188,7 @@ function parseNovaschemExport(rawText: string, sourceFileName: string): ParsedDa
     sourceDocument,
     initialAssignmentKeysByStudent,
     sourceFileName,
+    originalAvailableBlocksBySubject,
   }
 }
 
@@ -2388,6 +2488,10 @@ function App() {
   const [showStudentAddSubjectDialog, setShowStudentAddSubjectDialog] = useState<boolean>(false)
   const [studentAddSubjectCode, setStudentAddSubjectCode] = useState<string>('')
   const [studentAddSubjectBlock, setStudentAddSubjectBlock] = useState<string>('')
+  const [showStudentSwapDialog, setShowStudentSwapDialog] = useState<boolean>(false)
+  const [studentSwapAssignmentKey, setStudentSwapAssignmentKey] = useState<string>('')
+  const [studentSwapTargetSubject, setStudentSwapTargetSubject] = useState<string>('')
+  const [studentSwapTargetBlock, setStudentSwapTargetBlock] = useState<string>('')
   const [pendingRemovalAssignment, setPendingRemovalAssignment] = useState<string>('')
   const [showProgressiveBalanceDialog, setShowProgressiveBalanceDialog] = useState<boolean>(false)
   const [progressiveBalanceMaxOffset, setProgressiveBalanceMaxOffset] = useState<number>(-4)
@@ -2449,6 +2553,10 @@ function App() {
     setShowStudentAddSubjectDialog(false)
     setStudentAddSubjectCode('')
     setStudentAddSubjectBlock('')
+    setShowStudentSwapDialog(false)
+    setStudentSwapAssignmentKey('')
+    setStudentSwapTargetSubject('')
+    setStudentSwapTargetBlock('')
     setPendingRemovalAssignment('')
     setBytteSubjectVisibility({})
     lastHistorySnapshotRef.current = null
@@ -3551,7 +3659,7 @@ function App() {
                           <th>Tittel</th>
                           <th>Gruppe</th>
                           <th>Blokk</th>
-                          <th style={{ width: '80px' }}>Handling</th>
+                          <th style={{ width: '170px' }}>Handling</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -3569,6 +3677,29 @@ function App() {
                               <td>{assignment.groupCode}</td>
                               <td>{assignment.block || '-'}</td>
                               <td>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setPendingRemovalAssignment('')
+                                    setStudentSwapAssignmentKey(assignmentKey)
+                                    setStudentSwapTargetSubject(assignment.subjectCode)
+                                    setStudentSwapTargetBlock('')
+                                    setShowStudentSwapDialog(true)
+                                  }}
+                                  style={{
+                                    padding: '0.25rem 0.5rem',
+                                    fontSize: '0.875rem',
+                                    backgroundColor: '#0969da',
+                                    color: '#ffffff',
+                                    border: '1px solid #0969da',
+                                    borderRadius: '4px',
+                                    cursor: 'pointer',
+                                    marginRight: '0.35rem',
+                                  }}
+                                >
+                                  Bytt
+                                </button>
                                 <button
                                   type="button"
                                   onClick={(e) => {
@@ -3595,7 +3726,7 @@ function App() {
                                     })
 
                                     // Recalculate breakdowns
-                                    const { groupBreakdowns, blockBreakdowns } = recalculateBreakdowns(updatedStudents)
+                                    const { groupBreakdowns, blockBreakdowns } = recalculateBreakdowns(updatedStudents, parsedData.groupBreakdowns)
 
                                     // Update subjects with new student count
                                     const updatedSubjects = parsedData.subjects.map((subject) => {
@@ -4151,7 +4282,7 @@ function App() {
                                 assignments: updatedAssignments,
                               }
                             })
-                            const { groupBreakdowns: newGroupBreakdowns, blockBreakdowns: newBlockBreakdowns } = recalculateBreakdowns(updatedStudents)
+                            const { groupBreakdowns: newGroupBreakdowns, blockBreakdowns: newBlockBreakdowns } = recalculateBreakdowns(updatedStudents, parsedData.groupBreakdowns)
                             const updatedData = {
                               ...parsedData!,
                               students: updatedStudents,
@@ -4241,7 +4372,7 @@ function App() {
                             const {
                               groupBreakdowns: newGroupBreakdowns,
                               blockBreakdowns: newBlockBreakdowns,
-                            } = recalculateBreakdowns(updatedStudents)
+                            } = recalculateBreakdowns(updatedStudents, parsedData.groupBreakdowns)
 
                             const updatedData = {
                               ...parsedData!,
@@ -4300,18 +4431,35 @@ function App() {
                 >
                   <div className="modal-content" onClick={(e) => e.stopPropagation()}>
                     <h3>Legg til fag</h3>
-                    <p>Legg til fag som tilgjengelig i valgt blokk (uten å tildele elever).</p>
+                    <p>Legg til fag fra originalfilen i en blokk som ikke er brukt ennå.</p>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '1rem' }}>
                       <label>
                         <strong>Fag:</strong>
                         <select
                           value={addSubjectTargetCode}
-                          onChange={(e) => setAddSubjectTargetCode(e.target.value)}
+                          onChange={(e) => {
+                            setAddSubjectTargetCode(e.target.value)
+                            setAddSubjectTargetBlock('')
+                          }}
                           style={{ width: '100%', marginTop: '0.5rem', padding: '0.5rem' }}
                         >
                           <option value="">Velg fag...</option>
                           {parsedData.subjects
-                            .filter((subject) => subject.blocks.length > 0)
+                            .filter((subject) => {
+                              const originalBlocks = parsedData.originalAvailableBlocksBySubject[subject.code]
+                              if (!originalBlocks) {
+                                return false
+                              }
+
+                              const activeBlocks = new Set(
+                                parsedData.groupBreakdowns
+                                  .filter((group) => group.subjectCode === subject.code)
+                                  .map((group) => group.block),
+                              )
+
+                              const hasUnusedBlock = originalBlocks.some((block) => !activeBlocks.has(block))
+                              return hasUnusedBlock
+                            })
                             .slice()
                             .sort((a, b) => a.name.localeCompare(b.name))
                             .map((subject) => (
@@ -4330,10 +4478,20 @@ function App() {
                           style={{ width: '100%', marginTop: '0.5rem', padding: '0.5rem' }}
                         >
                           <option value="">Velg blokk...</option>
-                          <option value="Blokk 1">Blokk 1</option>
-                          <option value="Blokk 2">Blokk 2</option>
-                          <option value="Blokk 3">Blokk 3</option>
-                          <option value="Blokk 4">Blokk 4</option>
+                          {addSubjectTargetCode && parsedData.originalAvailableBlocksBySubject[addSubjectTargetCode]
+                            ? parsedData.originalAvailableBlocksBySubject[addSubjectTargetCode]
+                                .filter((block) => {
+                                  const hasGroupInBlock = parsedData.groupBreakdowns.some(
+                                    (group) => group.subjectCode === addSubjectTargetCode && group.block === block,
+                                  )
+                                  return !hasGroupInBlock
+                                })
+                                .map((block) => (
+                                  <option key={block} value={block}>
+                                    {block}
+                                  </option>
+                                ))
+                            : null}
                         </select>
                       </label>
 
@@ -4352,14 +4510,31 @@ function App() {
                               return
                             }
 
+                            const originalBlocks = parsedData.originalAvailableBlocksBySubject[addSubjectTargetCode]
+                            if (!originalBlocks || !originalBlocks.includes(addSubjectTargetBlock)) {
+                              alert('Valgt blokk er ikke tilgjengelig for dette faget i originalfilen')
+                              return
+                            }
+
+                            const hasGroupInTargetBlock = parsedData.groupBreakdowns.some(
+                              (group) => group.subjectCode === addSubjectTargetCode && group.block === addSubjectTargetBlock,
+                            )
+
+                            const wasAlreadyAvailable = hasGroupInTargetBlock
+                            if (wasAlreadyAvailable) {
+                              alert(`${targetSubject.name} er allerede tilgjengelig i ${addSubjectTargetBlock}.`)
+                              setShowAddSubjectDialog(false)
+                              setAddSubjectTargetCode('')
+                              setAddSubjectTargetBlock('')
+                              return
+                            }
+
                             const updatedSubjects = parsedData.subjects.map((subject) => {
                               if (subject.code !== addSubjectTargetCode) {
                                 return subject
                               }
 
-                              const nextBlocks = subject.blocks.includes(addSubjectTargetBlock)
-                                ? subject.blocks
-                                : sortBlocks([...subject.blocks, addSubjectTargetBlock])
+                              const nextBlocks = sortBlocks([...subject.blocks, addSubjectTargetBlock])
 
                               return {
                                 ...subject,
@@ -4370,10 +4545,6 @@ function App() {
                             const updatedBlocks = parsedData.blocks.includes(addSubjectTargetBlock)
                               ? parsedData.blocks
                               : sortBlocks([...parsedData.blocks, addSubjectTargetBlock])
-
-                            const hasGroupInTargetBlock = parsedData.groupBreakdowns.some(
-                              (group) => group.subjectCode === addSubjectTargetCode && group.block === addSubjectTargetBlock
-                            )
 
                             const updatedGroupBreakdowns = hasGroupInTargetBlock
                               ? parsedData.groupBreakdowns
@@ -4395,12 +4566,28 @@ function App() {
                             }
                             setParsedData(updatedData)
 
-                            const wasAlreadyAvailable = targetSubject.blocks.includes(addSubjectTargetBlock)
-                            if (wasAlreadyAvailable) {
-                              setBalanceMessage(`${targetSubject.name} er allerede tilgjengelig i ${addSubjectTargetBlock}.`)
-                            } else {
-                              setBalanceMessage(`${targetSubject.name} er nå tilgjengelig i ${addSubjectTargetBlock}.`)
+                            // Log to balance history like a balance operation
+                            const addSubjectChange: BalanceChange = {
+                              studentId: 'SYSTEM',
+                              studentName: 'System',
+                              subjectCode: addSubjectTargetCode,
+                              subjectName: targetSubject.name,
+                              fromGroupCode: '',
+                              fromBlock: '',
+                              toGroupCode: createDefaultGroupCode(addSubjectTargetCode, addSubjectTargetBlock),
+                              toBlock: addSubjectTargetBlock,
                             }
+
+                            const newHistoryRun: BalanceResultRun = {
+                              id: crypto.randomUUID(),
+                              createdAt: new Date().toISOString(),
+                              message: `Lagt til ${targetSubject.name} i ${addSubjectTargetBlock}`,
+                              changes: [addSubjectChange],
+                            }
+
+                            const updatedBalanceHistory = [...balanceHistory, newHistoryRun]
+                            setBalanceHistory(updatedBalanceHistory)
+                            setBalanceMessage(`${targetSubject.name} er nå tilgjengelig i ${addSubjectTargetBlock}.`)
 
                             setShowAddSubjectDialog(false)
                             setAddSubjectTargetCode('')
@@ -4464,13 +4651,13 @@ function App() {
                           onClick={() => {
                             if (!parsedData) return
 
-                            const result = progressiveBalanceGroups(parsedData.students, progressiveBalanceMaxOffset, (groups) => setDebugGroups(groups))
+                            const result = progressiveBalanceGroups(parsedData.students, parsedData.groupBreakdowns, progressiveBalanceMaxOffset, (groups) => setDebugGroups(groups))
                             setBalanceResults(result.allChanges)
                             
                             // Apply changes to the parsed data
                             if (result.allChanges.length > 0) {
                               const updatedStudents = applyBalanceChanges(parsedData.students, result.allChanges)
-                              const { groupBreakdowns: newGroupBreakdowns, blockBreakdowns: newBlockBreakdowns } = recalculateBreakdowns(updatedStudents)
+                              const { groupBreakdowns: newGroupBreakdowns, blockBreakdowns: newBlockBreakdowns } = recalculateBreakdowns(updatedStudents, parsedData.groupBreakdowns)
                               const updatedData = {
                                 ...parsedData,
                                 students: updatedStudents,
@@ -4997,7 +5184,7 @@ function App() {
                         })
 
                         // Recalculate breakdowns
-                        const { groupBreakdowns, blockBreakdowns } = recalculateBreakdowns(updatedStudents)
+                        const { groupBreakdowns, blockBreakdowns } = recalculateBreakdowns(updatedStudents, parsedData.groupBreakdowns)
 
                         // Update subjects with new student count
                         const updatedSubjects = parsedData.subjects.map((subject) => {
@@ -5057,6 +5244,274 @@ function App() {
                     </button>
                   </div>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {showStudentSwapDialog && selectedStudent && parsedData && (
+            <div
+              className="modal-overlay"
+              onClick={() => {
+                setShowStudentSwapDialog(false)
+                setStudentSwapAssignmentKey('')
+                setStudentSwapTargetSubject('')
+                setStudentSwapTargetBlock('')
+              }}
+            >
+              <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+                {(() => {
+                  const [subjectCode, groupCode, block] = studentSwapAssignmentKey.split('|')
+                  const swapAssignment = selectedStudent.assignments.find(
+                    (assignment) =>
+                      assignment.subjectCode === subjectCode
+                      && assignment.groupCode === groupCode
+                      && assignment.block === block,
+                  )
+
+                  if (!swapAssignment) {
+                    return (
+                      <>
+                        <h3>Bytt blokk</h3>
+                        <p>Fant ikke valgt fag for eleven. Lukk og prøv igjen.</p>
+                      </>
+                    )
+                  }
+
+                  const targetSubjectCode = studentSwapTargetSubject || swapAssignment.subjectCode
+                  const targetSubject = parsedData.subjects.find((subject) => subject.code === targetSubjectCode)
+                  const blockChoices = getSubjectBlockChoices(parsedData, targetSubjectCode)
+
+                  return (
+                    <>
+                      <h3>Bytt fag/blokk for {selectedStudent.fullName}</h3>
+                      <p style={{ marginTop: '0.4rem' }}>
+                        <strong>{swapAssignment.subjectName}</strong> er nå i {swapAssignment.block} ({swapAssignment.groupCode})
+                      </p>
+
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '1rem' }}>
+                        <label>
+                          <strong>Nytt fag:</strong>
+                          <select
+                            value={targetSubjectCode}
+                            onChange={(e) => {
+                              setStudentSwapTargetSubject(e.target.value)
+                              setStudentSwapTargetBlock('')
+                            }}
+                            style={{ width: '100%', marginTop: '0.5rem', padding: '0.5rem' }}
+                          >
+                            <option value="">Velg fag...</option>
+                            {parsedData.subjects
+                              .filter((subject) => subject.blocks.length > 0)
+                              .slice()
+                              .sort((a, b) => a.name.localeCompare(b.name))
+                              .map((subject) => (
+                                <option key={subject.code} value={subject.code}>
+                                  {subject.code} - {subject.name}
+                                </option>
+                              ))}
+                          </select>
+                        </label>
+
+                        <label>
+                          <strong>Ny blokk:</strong>
+                          <select
+                            value={studentSwapTargetBlock}
+                            onChange={(e) => setStudentSwapTargetBlock(e.target.value)}
+                            style={{ width: '100%', marginTop: '0.5rem', padding: '0.5rem' }}
+                          >
+                            <option value="">Velg blokk...</option>
+                            {blockChoices.map((choice) => (
+                              <option key={choice.block} value={choice.block}>
+                                {choice.block} ({choice.studentCount} elever)
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+
+                        <div style={{ display: 'flex', gap: '0.5rem' }}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!targetSubjectCode) {
+                                alert('Vennligst velg fag')
+                                return
+                              }
+
+                              if (!studentSwapTargetBlock) {
+                                alert('Vennligst velg ny blokk')
+                                return
+                              }
+
+                              if (!targetSubject) {
+                                alert('Fag ikke funnet')
+                                return
+                              }
+
+                              if (
+                                targetSubjectCode !== swapAssignment.subjectCode
+                                && selectedStudent.assignments.some((assignment) => assignment.subjectCode === targetSubjectCode)
+                              ) {
+                                alert(`${selectedStudent.fullName} har allerede ${targetSubject.name}`)
+                                return
+                              }
+
+                              const targetGroups = parsedData.groupBreakdowns
+                                .filter((group) => group.subjectCode === targetSubjectCode && group.block === studentSwapTargetBlock)
+                                .sort((a, b) => a.studentCount - b.studentCount)
+
+                              const smallestGroup = targetGroups[0]
+                              if (!smallestGroup) {
+                                alert(`Ingen grupper funnet for ${targetSubject.name} i ${studentSwapTargetBlock}`)
+                                return
+                              }
+
+                              const updatedStudents = parsedData.students.map((student) => {
+                                if (student.id !== selectedStudent.id) {
+                                  return student
+                                }
+
+                                if (targetSubjectCode !== swapAssignment.subjectCode) {
+                                  return {
+                                    ...student,
+                                    assignments: student.assignments
+                                      .filter((assignment) => !(
+                                        assignment.subjectCode === swapAssignment.subjectCode
+                                        && assignment.groupCode === swapAssignment.groupCode
+                                        && assignment.block === swapAssignment.block
+                                      ))
+                                      .concat([
+                                        {
+                                          subjectCode: targetSubjectCode,
+                                          subjectName: targetSubject.name,
+                                          groupCode: smallestGroup.groupCode,
+                                          block: studentSwapTargetBlock,
+                                        },
+                                      ]),
+                                  }
+                                }
+
+                                return {
+                                  ...student,
+                                  assignments: student.assignments.map((assignment) => {
+                                    if (
+                                      assignment.subjectCode === swapAssignment.subjectCode
+                                      && assignment.groupCode === swapAssignment.groupCode
+                                      && assignment.block === swapAssignment.block
+                                    ) {
+                                      return {
+                                        ...assignment,
+                                        subjectName: targetSubject.name,
+                                        groupCode: smallestGroup.groupCode,
+                                        block: studentSwapTargetBlock,
+                                      }
+                                    }
+                                    return assignment
+                                  }),
+                                }
+                              })
+
+                              const { groupBreakdowns, blockBreakdowns } = recalculateBreakdowns(updatedStudents, parsedData.groupBreakdowns)
+
+                              const updatedSubjects = parsedData.subjects.map((subject) => {
+                                if (targetSubjectCode === swapAssignment.subjectCode) {
+                                  return subject
+                                }
+
+                                if (subject.code === swapAssignment.subjectCode) {
+                                  return {
+                                    ...subject,
+                                    studentCount: Math.max(0, subject.studentCount - 1),
+                                  }
+                                }
+
+                                if (subject.code === targetSubjectCode) {
+                                  return {
+                                    ...subject,
+                                    studentCount: subject.studentCount + 1,
+                                  }
+                                }
+
+                                return subject
+                              })
+
+                              setParsedData({
+                                ...parsedData,
+                                students: updatedStudents,
+                                subjects: updatedSubjects,
+                                groupBreakdowns,
+                                blockBreakdowns,
+                              })
+
+                              const manualChanges: BalanceChange[] = targetSubjectCode === swapAssignment.subjectCode
+                                ? [
+                                    {
+                                      studentId: selectedStudent.id,
+                                      studentName: selectedStudent.fullName,
+                                      subjectCode: swapAssignment.subjectCode,
+                                      subjectName: targetSubject.name,
+                                      fromGroupCode: swapAssignment.groupCode,
+                                      fromBlock: swapAssignment.block,
+                                      toGroupCode: smallestGroup.groupCode,
+                                      toBlock: studentSwapTargetBlock,
+                                    },
+                                  ]
+                                : [
+                                    {
+                                      studentId: selectedStudent.id,
+                                      studentName: selectedStudent.fullName,
+                                      subjectCode: swapAssignment.subjectCode,
+                                      subjectName: swapAssignment.subjectName,
+                                      fromGroupCode: swapAssignment.groupCode,
+                                      fromBlock: swapAssignment.block,
+                                      toGroupCode: '',
+                                      toBlock: '',
+                                    },
+                                    {
+                                      studentId: selectedStudent.id,
+                                      studentName: selectedStudent.fullName,
+                                      subjectCode: targetSubjectCode,
+                                      subjectName: targetSubject.name,
+                                      fromGroupCode: '',
+                                      fromBlock: '',
+                                      toGroupCode: smallestGroup.groupCode,
+                                      toBlock: studentSwapTargetBlock,
+                                    },
+                                  ]
+
+                              const nextMessage = targetSubjectCode === swapAssignment.subjectCode
+                                ? `${swapAssignment.subjectName} byttet for ${selectedStudent.fullName}: ${swapAssignment.block} -> ${studentSwapTargetBlock}`
+                                : `${swapAssignment.subjectName} byttet til ${targetSubject.name} for ${selectedStudent.fullName}`
+
+                              appendBalanceHistoryRun(manualChanges, nextMessage)
+
+                              setBalanceMessage(nextMessage)
+                              setShowStudentSwapDialog(false)
+                              setStudentSwapAssignmentKey('')
+                              setStudentSwapTargetSubject('')
+                              setStudentSwapTargetBlock('')
+                            }}
+                            className="balance-button"
+                            disabled={!targetSubjectCode || !studentSwapTargetBlock}
+                          >
+                            Bytt
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowStudentSwapDialog(false)
+                              setStudentSwapAssignmentKey('')
+                              setStudentSwapTargetSubject('')
+                              setStudentSwapTargetBlock('')
+                            }}
+                            className="clear-results-button"
+                          >
+                            Avbryt
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  )
+                })()}
               </div>
             </div>
           )}
