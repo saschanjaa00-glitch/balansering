@@ -3984,6 +3984,40 @@ function App() {
                   })}
               </div>
 
+              <h2>Per fag (alle grupper)</h2>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Fag</th>
+                    <th>Tittel</th>
+                    {perSubjectBlockColumns.map((block) => (
+                      <th key={`head-${block}`}>{block}</th>
+                    ))}
+                    <th>Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {perSubjectMatrixRows.filter((row) => row.total > 0).map((row) => (
+                    <tr key={row.subject.code} className={row.isOverfilled ? 'subject-overfilled-row' : ''}>
+                      <td>{row.subject.code}</td>
+                      <td>{row.subject.name}</td>
+                      {perSubjectBlockColumns.map((block) => {
+                        const hasGroup = row.hasGroupByBlock.get(block) || false
+                        const count = row.countsByBlock.get(block) || 0
+                        const isOverLimit = hasGroup && count > row.maxCap
+
+                        return (
+                          <td key={`${row.subject.code}-${block}`} className={isOverLimit ? 'subject-over-limit' : ''}>
+                            {hasGroup ? count : '-'}
+                          </td>
+                        )
+                      })}
+                      <td>{row.total}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
               <h2>Per faggruppe</h2>
               <div className="per-faggruppe-toolbar">
                 <label htmlFor="per-faggruppe-sort">Sortér:</label>
@@ -4010,12 +4044,12 @@ function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredGroupBreakdowns.map((item) => {
+                  {filteredGroupBreakdowns.filter((item) => item.studentCount > 0).map((item) => {
                     const groupKey = `${item.subjectCode}|${item.groupCode}|${item.block}`
                     const delta = balanceDeltaCounts.get(groupKey)
                     const isExpanded = selectedGroupKey === `${item.subjectCode}-${item.groupCode}-${item.block}`
                     const colSpan = balanceDeltaCounts.size > 0 ? 6 : 5
-                    
+
                     return (
                       <>
                         <tr
@@ -4690,39 +4724,6 @@ function App() {
 
 
 
-              <h2>Per fag (alle grupper)</h2>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Fag</th>
-                    <th>Tittel</th>
-                    {perSubjectBlockColumns.map((block) => (
-                      <th key={`head-${block}`}>{block}</th>
-                    ))}
-                    <th>Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {perSubjectMatrixRows.map((row) => (
-                    <tr key={row.subject.code} className={row.isOverfilled ? 'subject-overfilled-row' : ''}>
-                      <td>{row.subject.code}</td>
-                      <td>{row.subject.name}</td>
-                      {perSubjectBlockColumns.map((block) => {
-                        const hasGroup = row.hasGroupByBlock.get(block) || false
-                        const count = row.countsByBlock.get(block) || 0
-                        const isOverLimit = hasGroup && count > row.maxCap
-
-                        return (
-                          <td key={`${row.subject.code}-${block}`} className={isOverLimit ? 'subject-over-limit' : ''}>
-                            {hasGroup ? count : '-'}
-                          </td>
-                        )
-                      })}
-                      <td>{row.total}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
             </section>
           ) : viewMode === 'blokkoversikt' ? (
             <section className="subject-panel">
