@@ -1541,6 +1541,73 @@ function getFinalSubjectsByBlock(student?: StudentRecord): Array<{ blockNumber: 
     })
 }
 
+function getBalanceRunLabel(message: string): string {
+  const trimmed = message.trim()
+
+  if (!trimmed) {
+    return 'Balansering'
+  }
+
+  if (trimmed.startsWith('Progressiv balansering')) {
+    return 'Progressiv balansering'
+  }
+
+  if (trimmed.startsWith('Masseoppdatering')) {
+    return 'Masseoppdatering'
+  }
+
+  if (trimmed.startsWith('Fant ') || trimmed.startsWith('✓ Ingen overfulle grupper')) {
+    return 'Balansering'
+  }
+
+  if (trimmed.includes('lagt til') || trimmed.includes('fjernet')) {
+    return 'Manuell endring'
+  }
+
+  return trimmed
+}
+
+function groupBalanceRunsBySubject(
+  runs: Array<{ runId: string; createdAt: string; message: string; changes: BalanceChange[] }>,
+): Array<{
+  subjectCode: string
+  subjectName: string
+  changes: Array<{ runId: string; createdAt: string; message: string; change: BalanceChange }>
+}> {
+  const grouped = new Map<string, {
+    subjectCode: string
+    subjectName: string
+    changes: Array<{ runId: string; createdAt: string; message: string; change: BalanceChange }>
+  }>()
+
+  runs.forEach((run) => {
+    run.changes.forEach((change) => {
+      const key = change.subjectCode
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          subjectCode: change.subjectCode,
+          subjectName: formatSubjectDisplayName(change.subjectName || change.subjectCode),
+          changes: [],
+        })
+      }
+
+      grouped.get(key)?.changes.push({
+        runId: run.runId,
+        createdAt: run.createdAt,
+        message: run.message,
+        change,
+      })
+    })
+  })
+
+  return Array.from(grouped.values())
+    .map((subjectGroup) => ({
+      ...subjectGroup,
+      changes: subjectGroup.changes.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()),
+    }))
+    .sort((a, b) => a.subjectName.localeCompare(b.subjectName, 'nb-NO'))
+}
+
 function sanitizeHeader(value: string): string {
   return value.replace(/\s+\(\d+\)$/u, '').trim()
 }
@@ -3579,15 +3646,23 @@ function App() {
                               ))}
                             </>
                           )}
-                          {student.runs.map((run) => (
-                            <div key={run.runId} className="balance-run-segment">
-                              <div className="balance-run-meta">
-                                <span>{run.message || 'Balansering'}</span>
-                                <span>{formatTimestamp(run.createdAt)}</span>
-                              </div>
-                              {run.changes.map((change) => (
-                                <div key={`${run.runId}-${change.subjectCode}-${change.fromGroupCode}-${change.toGroupCode}-${change.fromBlock}-${change.toBlock}`} className="balance-change-line balance-change-moved">
-                                  <strong>{change.subjectName || change.subjectCode}</strong>: {formatBalanceChangeText(change)}
+                          {groupBalanceRunsBySubject(student.runs).map((subjectGroup) => (
+                            <div key={`${student.studentId}-${subjectGroup.subjectCode}`} className="balance-subject-group">
+                              {subjectGroup.changes.map(({ runId, createdAt, message, change }) => (
+                                <div
+                                  key={`${runId}-${change.subjectCode}-${change.fromGroupCode}-${change.toGroupCode}-${change.fromBlock}-${change.toBlock}`}
+                                  className={`balance-change-line ${
+                                    !change.fromGroupCode.trim() && !change.fromBlock.trim() && (change.toGroupCode.trim() || change.toBlock.trim())
+                                      ? 'balance-change-added'
+                                      : !change.toGroupCode.trim() && !change.toBlock.trim() && (change.fromGroupCode.trim() || change.fromBlock.trim())
+                                        ? 'balance-change-removed'
+                                        : 'balance-change-moved'
+                                  }`}
+                                >
+                                  <span className="balance-change-main">
+                                    <strong>{subjectGroup.subjectName}</strong>: {formatBalanceChangeText(change)}
+                                  </span>
+                                  <span className="balance-change-meta">{getBalanceRunLabel(message || 'Balansering')} {formatTimestamp(createdAt)}</span>
                                 </div>
                               ))}
                             </div>

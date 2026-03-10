@@ -460,27 +460,50 @@ button {
   padding-top: 0.2rem;
 }
 
-.balance-run-meta {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 0.5rem;
-  color: #5e7390;
-  font-size: 0.8rem;
+.balance-subject-group {
+  margin-top: 0.5rem;
+  padding-top: 0.45rem;
+  margin-left: 1rem;
+  border-top: 1px solid #eef3f9;
 }
 
-.balance-run-meta span:last-child {
-  text-align: right;
-  white-space: nowrap;
+.balance-subject-heading {
+  margin: 0.35rem 0 0.15rem 1rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #4f6280;
+}
+
+.balance-subject-group:first-of-type {
+  margin-top: 0.2rem;
+  padding-top: 0;
+  border-top: none;
 }
 
 .balance-change-line {
-  margin-left: 1rem;
   margin-top: 0.3rem;
   font-size: 0.95rem;
   padding: 0.18rem 0.4rem;
   border-radius: 6px;
   border-left: 3px solid transparent;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.balance-change-main {
+  min-width: 0;
+}
+
+.balance-change-meta {
+  flex-shrink: 0;
+  color: #5e7390;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  text-align: right;
 }
 
 .balance-change-moved {
