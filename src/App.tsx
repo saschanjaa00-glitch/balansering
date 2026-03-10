@@ -1541,6 +1541,48 @@ function getFinalSubjectsByBlock(student?: StudentRecord): Array<{ blockNumber: 
     })
 }
 
+function getSubjectBlockChoices(
+  parsedData: ParsedData,
+  subjectCode: string,
+): Array<{ block: string; studentCount: number; groupCount: number }> {
+  const subject = parsedData.subjects.find((item) => item.code === subjectCode)
+  if (!subject) {
+    return []
+  }
+
+  const byBlock = new Map<string, { studentCount: number; groupCount: number }>()
+  subject.blocks.forEach((block) => {
+    byBlock.set(block, { studentCount: 0, groupCount: 0 })
+  })
+
+  parsedData.groupBreakdowns.forEach((group) => {
+    if (group.subjectCode !== subjectCode) {
+      return
+    }
+
+    if (!byBlock.has(group.block)) {
+      byBlock.set(group.block, { studentCount: 0, groupCount: 0 })
+    }
+
+    const current = byBlock.get(group.block)
+    if (!current) {
+      return
+    }
+
+    current.studentCount += group.studentCount
+    current.groupCount += 1
+  })
+
+  return sortBlocks(Array.from(byBlock.keys())).map((block) => {
+    const current = byBlock.get(block) || { studentCount: 0, groupCount: 0 }
+    return {
+      block,
+      studentCount: current.studentCount,
+      groupCount: current.groupCount,
+    }
+  })
+}
+
 function getBalanceRunLabel(message: string): string {
   const trimmed = message.trim()
 
@@ -3631,44 +3673,6 @@ function App() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => {
-                    const result = balanceGroups(parsedData.students, (groups) => setDebugGroups(groups))
-                    setBalanceResults(result.changes)
-                    
-                    // Apply changes to the parsed data
-                    if (result.changes.length > 0) {
-                      const updatedStudents = applyBalanceChanges(parsedData.students, result.changes)
-                      const { groupBreakdowns: newGroupBreakdowns, blockBreakdowns: newBlockBreakdowns } = recalculateBreakdowns(updatedStudents)
-                      const updatedData = {
-                        ...parsedData,
-                        students: updatedStudents,
-                        groupBreakdowns: newGroupBreakdowns,
-                        blockBreakdowns: newBlockBreakdowns,
-                      }
-                      setParsedData(updatedData)
-                    }
-                    
-                    let nextBalanceMessage = ''
-                    if (result.overcrowdedCount === 0) {
-                      nextBalanceMessage = '✓ Ingen overfulle grupper. Alle grupper er innenfor kapasitet.'
-                    } else if (result.changes.length === 0) {
-                      nextBalanceMessage = `Fant ${result.overcrowdedCount} overfull(e) gruppe(r), men ingen elever kan flyttes (alle elever har unike blokktildelinger i disse fagene).`
-                    } else {
-                      const uniqueStudents = new Set(result.changes.map((c) => c.studentId))
-                      nextBalanceMessage = `Fant ${result.overcrowdedCount} overfull(e) gruppe(r). Flyttet ${uniqueStudents.size} elev(er) (${result.changes.length} fagendringer).`
-                    }
-                    if (result.collisionErrors && result.collisionErrors.length > 0) {
-                      nextBalanceMessage += ` ${result.collisionErrors.length} elev(er) har uløsbare blokk-kollisjoner.`
-                    }
-                    appendBalanceHistoryRun(result.changes, nextBalanceMessage, result.collisionErrors)
-                    setBalanceMessage(nextBalanceMessage)
-                    }}
-                    className="balance-button"
-                  >
-                    Balanser
-                  </button>
-                  <button
-                    type="button"
                     onClick={() => setShowProgressiveBalanceDialog(true)}
                     className="balance-button"
                   >
@@ -3925,6 +3929,9 @@ function App() {
                                   onClick={(e) => {
                                     e.stopPropagation()
                                     setPendingMassRemoval(false)
+                                    const [currentSubjectCode] = selectedGroupKey.split('-')
+                                    setMassUpdateTargetSubject(currentSubjectCode || '')
+                                    setMassUpdateTargetBlock('')
                                     setShowMassUpdateDialog(true)
                                   }}
                                   disabled={selectedStudentsForMassUpdate.size === 0}
@@ -4010,7 +4017,10 @@ function App() {
                         <strong>Nytt fag:</strong>
                         <select
                           value={massUpdateTargetSubject}
-                          onChange={(e) => setMassUpdateTargetSubject(e.target.value)}
+                          onChange={(e) => {
+                            setMassUpdateTargetSubject(e.target.value)
+                            setMassUpdateTargetBlock('')
+                          }}
                           style={{ width: '100%', marginTop: '0.5rem', padding: '0.5rem' }}
                         >
                           <option value="">Velg fag...</option>
@@ -4032,10 +4042,14 @@ function App() {
                           style={{ width: '100%', marginTop: '0.5rem', padding: '0.5rem' }}
                         >
                           <option value="">Velg blokk...</option>
-                          <option value="Blokk 1">Blokk 1</option>
-                          <option value="Blokk 2">Blokk 2</option>
-                          <option value="Blokk 3">Blokk 3</option>
-                          <option value="Blokk 4">Blokk 4</option>
+                          {(massUpdateTargetSubject
+                            ? getSubjectBlockChoices(parsedData, massUpdateTargetSubject)
+                            : []
+                          ).map((choice) => (
+                            <option key={choice.block} value={choice.block}>
+                              {choice.block} ({choice.studentCount} elever)
+                            </option>
+                          ))}
                         </select>
                       </label>
                       <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
@@ -4912,34 +4926,19 @@ function App() {
 
                   {studentAddSubjectCode && (
                     <div>
-                      <strong>Velg blokk og gruppe:</strong>
-                      <div style={{ marginTop: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                        {parsedData.groupBreakdowns
-                          .filter((group) => group.subjectCode === studentAddSubjectCode)
-                          .sort((a, b) => {
-                            const blockCompare = sortBlocks([a.block, b.block]).indexOf(a.block) - sortBlocks([a.block, b.block]).indexOf(a.block)
-                            if (blockCompare !== 0) return blockCompare
-                            return a.groupCode.localeCompare(b.groupCode)
-                          })
-                          .map((group) => (
-                            <button
-                              key={`${group.groupCode}-${group.block}`}
-                              type="button"
-                              onClick={() => setStudentAddSubjectBlock(`${group.groupCode}|${group.block}`)}
-                              className={studentAddSubjectBlock === `${group.groupCode}|${group.block}` ? 'filter-button active' : 'filter-button'}
-                              style={{
-                                padding: '0.75rem',
-                                textAlign: 'left',
-                                fontWeight: 'normal',
-                                backgroundColor: studentAddSubjectBlock === `${group.groupCode}|${group.block}` ? '#0969da' : '#f9fafb',
-                                color: studentAddSubjectBlock === `${group.groupCode}|${group.block}` ? '#ffffff' : '#24292f',
-                                border: studentAddSubjectBlock === `${group.groupCode}|${group.block}` ? '1px solid #0969da' : '1px solid #d0d7de',
-                              }}
-                            >
-                              {group.block} - {group.subjectName} ({group.studentCount} elever)
-                            </button>
-                          ))}
-                      </div>
+                      <strong>Velg blokk:</strong>
+                      <select
+                        value={studentAddSubjectBlock}
+                        onChange={(e) => setStudentAddSubjectBlock(e.target.value)}
+                        style={{ width: '100%', marginTop: '0.5rem', padding: '0.5rem' }}
+                      >
+                        <option value="">Velg blokk...</option>
+                        {getSubjectBlockChoices(parsedData, studentAddSubjectCode).map((choice) => (
+                          <option key={choice.block} value={choice.block}>
+                            {choice.block} ({choice.studentCount} elever)
+                          </option>
+                        ))}
+                      </select>
                     </div>
                   )}
 
@@ -4948,16 +4947,28 @@ function App() {
                       type="button"
                       onClick={() => {
                         if (!studentAddSubjectCode || !studentAddSubjectBlock) {
-                          alert('Vennligst velg fag og gruppe')
+                          alert('Vennligst velg fag og blokk')
                           return
                         }
 
-                        const [groupCode, block] = studentAddSubjectBlock.split('|')
+                        const block = studentAddSubjectBlock
                         const targetSubject = parsedData.subjects.find((s) => s.code === studentAddSubjectCode)
                         if (!targetSubject) {
                           alert('Fag ikke funnet')
                           return
                         }
+
+                        const targetGroups = parsedData.groupBreakdowns
+                          .filter((group) => group.subjectCode === studentAddSubjectCode && group.block === block)
+                          .sort((a, b) => a.studentCount - b.studentCount)
+
+                        const smallestGroup = targetGroups[0]
+                        if (!smallestGroup) {
+                          alert(`Ingen grupper funnet for ${targetSubject.name} i ${block}`)
+                          return
+                        }
+
+                        const groupCode = smallestGroup.groupCode
 
                         // Check if student already has this subject
                         if (selectedStudent.assignments.some((a) => a.subjectCode === studentAddSubjectCode)) {
