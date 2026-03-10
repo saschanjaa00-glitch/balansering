@@ -1493,6 +1493,54 @@ function sortBlocks(blocks: string[]): string[] {
   })
 }
 
+function formatSubjectDisplayName(subjectName: string): string {
+  const normalized = subjectName.trim().toLowerCase()
+
+  if (normalized === 'internasjonal engelsk, skriftlig') {
+    return 'Engelsk 1'
+  }
+
+  if (normalized === 'samfunnsfaglig engelsk, skriftlig') {
+    return 'Engelsk 2'
+  }
+
+  return subjectName
+}
+
+function getFinalSubjectsByBlock(student?: StudentRecord): Array<{ blockNumber: string; subjects: string }> {
+  if (!student) {
+    return []
+  }
+
+  const subjectsByBlock = new Map<string, string[]>()
+
+  student.assignments.forEach((assignment) => {
+    if (!/^Blokk [1-4]$/u.test(assignment.block)) {
+      return
+    }
+
+    if (!subjectsByBlock.has(assignment.block)) {
+      subjectsByBlock.set(assignment.block, [])
+    }
+
+    const subjectLabel = formatSubjectDisplayName(assignment.subjectName || assignment.subjectCode)
+    const blockSubjects = subjectsByBlock.get(assignment.block)
+    if (blockSubjects && !blockSubjects.includes(subjectLabel)) {
+      blockSubjects.push(subjectLabel)
+    }
+  })
+
+  return sortBlocks(Array.from(subjectsByBlock.keys()))
+    .map((block) => {
+      const blockNumber = block.replace('Blokk ', '')
+      const subjectLabels = [...(subjectsByBlock.get(block) || [])].sort((a, b) => a.localeCompare(b, 'nb-NO'))
+      return {
+        blockNumber,
+        subjects: subjectLabels.join(' / '),
+      }
+    })
+}
+
 function sanitizeHeader(value: string): string {
   return value.replace(/\s+\(\d+\)$/u, '').trim()
 }
@@ -2890,10 +2938,12 @@ function App() {
   }, [balanceResults])
 
   const balanceHistoryByStudent = useMemo(() => {
-    const grouped = new Map<string, { studentId: string; studentName: string; classGroup: string; runs: Array<{ runId: string; createdAt: string; message: string; changes: BalanceChange[] }> }>()
+    const grouped = new Map<string, { studentId: string; studentName: string; classGroup: string; finalSubjectsSummary: Array<{ blockNumber: string; subjects: string }>; runs: Array<{ runId: string; createdAt: string; message: string; changes: BalanceChange[] }> }>()
     const studentClassById = new Map<string, string>()
+    const studentById = new Map<string, StudentRecord>()
     ;(parsedData?.students || []).forEach((student) => {
       studentClassById.set(student.id, student.classGroup || '')
+      studentById.set(student.id, student)
     })
 
     balanceHistory.forEach((run) => {
@@ -2913,8 +2963,9 @@ function App() {
       byStudent.forEach((studentChanges, studentId) => {
         const studentName = studentChanges[0]?.studentName || `Student ${studentId}`
         const classGroup = studentClassById.get(studentId) || ''
+        const finalSubjectsSummary = getFinalSubjectsByBlock(studentById.get(studentId))
         if (!grouped.has(studentId)) {
-          grouped.set(studentId, { studentId, studentName, classGroup, runs: [] })
+          grouped.set(studentId, { studentId, studentName, classGroup, finalSubjectsSummary, runs: [] })
         }
 
         grouped.get(studentId)?.runs.push({
@@ -3517,6 +3568,17 @@ function App() {
                       {balanceHistoryByStudent.map((student) => (
                         <div key={student.studentId} className="balance-item">
                           <strong>{student.studentName}</strong> ({student.classGroup || '-'}) ({student.studentId})
+                          {student.finalSubjectsSummary.length > 0 && (
+                            <>
+                              {' - '}
+                              {student.finalSubjectsSummary.map((item, index) => (
+                                <span key={`${student.studentId}-${item.blockNumber}`}>
+                                  {index > 0 ? ' ' : ''}
+                                  <strong>{item.blockNumber}:</strong> {item.subjects}
+                                </span>
+                              ))}
+                            </>
+                          )}
                           {student.runs.map((run) => (
                             <div key={run.runId} className="balance-run-segment">
                               <div className="balance-run-meta">
