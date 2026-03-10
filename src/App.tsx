@@ -402,6 +402,120 @@ function createDefaultGroupCode(subjectCode: string, block: string): string {
   return suffix ? `${subjectCode}${suffix}` : subjectCode
 }
 
+/**
+ * Fixes pre-existing block collisions in place.
+ * A collision is when a student has two subjects scheduled in the same block.
+ * For each such collision, we try to move one of the subjects to a different
+ * block that is free for this student and has capacity in a group.
+ * Operates on the live groupOccupancy map so it correctly reflects any moves
+ * already made during the same balancing pass.
+ */
+function fixCollisionsInPlace(
+  students: StudentRecord[],
+  groupOccupancy: Map<string, string[]>,
+  changes: BalanceChange[],
+  studentsLookup: Map<string, StudentRecord>,
+  maxCapacityOffset: number = 0
+): void {
+  // Build a live view: studentId -> block -> [{subjectCode, subjectName, groupCode}]
+  const studentBlocks = new Map<string, Map<string, Array<{ subjectCode: string; subjectName: string; groupCode: string }>>>()
+
+  groupOccupancy.forEach((occupants, occKey) => {
+    const [sc, gc, blk] = occKey.split('|')
+    if (!/^Blokk [1-4]$/u.test(blk)) return
+    const subjectName = students.flatMap((s) => s.assignments).find((a) => a.subjectCode === sc)?.subjectName || ''
+    if (!subjectName) return
+
+    for (const sid of occupants) {
+      if (!studentBlocks.has(sid)) studentBlocks.set(sid, new Map())
+      const blockMap = studentBlocks.get(sid)!
+      if (!blockMap.has(blk)) blockMap.set(blk, [])
+      blockMap.get(blk)!.push({ subjectCode: sc, subjectName, groupCode: gc })
+    }
+  })
+
+  studentBlocks.forEach((blockMap, studentId) => {
+    const student = studentsLookup.get(studentId) ?? students.find((s) => s.id === studentId)
+    if (!student) return
+
+    blockMap.forEach((subjects, collidingBlock) => {
+      if (subjects.length < 2) return
+
+      // Helper: commit a collision-fix move and update all live state.
+      const commitMove = (subjectCode: string, subjectName: string, groupCode: string, otherKey: string, otherGroupCode: string, otherBlock: string): void => {
+        changes.push({
+          studentId,
+          studentName: student.fullName,
+          subjectCode,
+          subjectName,
+          fromGroupCode: groupCode,
+          fromBlock: collidingBlock,
+          toGroupCode: otherGroupCode,
+          toBlock: otherBlock,
+        })
+
+        const fromKey = `${subjectCode}|${groupCode}|${collidingBlock}`
+        const idx = groupOccupancy.get(fromKey)?.indexOf(studentId) ?? -1
+        if (idx !== -1) groupOccupancy.get(fromKey)?.splice(idx, 1)
+        if (!groupOccupancy.has(otherKey)) groupOccupancy.set(otherKey, [])
+        groupOccupancy.get(otherKey)!.push(studentId)
+
+        const inColliding = blockMap.get(collidingBlock)!
+        const subjectIdx = inColliding.findIndex((s) => s.subjectCode === subjectCode && s.groupCode === groupCode)
+        if (subjectIdx !== -1) inColliding.splice(subjectIdx, 1)
+        if (!blockMap.has(otherBlock)) blockMap.set(otherBlock, [])
+        blockMap.get(otherBlock)!.push({ subjectCode, subjectName, groupCode: otherGroupCode })
+      }
+
+      // Try to move each subject out of the colliding block (try last first).
+      for (const { subjectCode, subjectName, groupCode } of [...subjects].reverse()) {
+        const maxCap = getMaxCapacityForSubject(subjectName) + maxCapacityOffset
+
+        // Pass 1: prefer a group within capacity.
+        let moved = false
+        for (const [otherKey, occupants] of groupOccupancy.entries()) {
+          const [otherSubject, otherGroupCode, otherBlock] = otherKey.split('|')
+          if (otherSubject !== subjectCode) continue
+          if (otherBlock === collidingBlock) continue
+          if (!canStudentMoveToBlock(student, otherBlock)) continue
+          if (occupants.length >= maxCap) continue
+          if (blockMap.has(otherBlock)) continue
+          if (occupants.includes(studentId)) continue
+
+          commitMove(subjectCode, subjectName, groupCode, otherKey, otherGroupCode, otherBlock)
+          moved = true
+          break
+        }
+
+        // Pass 2: no capacity-respecting slot found — resolving the collision is more
+        // important than holding the cap, so pick the least-full group in a free block.
+        if (!moved) {
+          const candidates: Array<{ key: string; groupCode: string; block: string; size: number }> = []
+          for (const [otherKey, occupants] of groupOccupancy.entries()) {
+            const [otherSubject, otherGroupCode, otherBlock] = otherKey.split('|')
+            if (otherSubject !== subjectCode) continue
+            if (otherBlock === collidingBlock) continue
+            if (!canStudentMoveToBlock(student, otherBlock)) continue
+            if (blockMap.has(otherBlock)) continue
+            if (occupants.includes(studentId)) continue
+            candidates.push({ key: otherKey, groupCode: otherGroupCode, block: otherBlock, size: occupants.length })
+          }
+          if (candidates.length > 0) {
+            candidates.sort((a, b) => a.size - b.size)
+            const best = candidates[0]
+            commitMove(subjectCode, subjectName, groupCode, best.key, best.groupCode, best.block)
+            moved = true
+          }
+        }
+
+        // If this block's collision is already resolved, stop trying other subjects.
+        const remaining = blockMap.get(collidingBlock)
+        if (!remaining || remaining.length < 2) break
+      }
+    })
+  })
+}
+
 function canStudentMoveToBlock(student: StudentRecord, targetBlock: string): boolean {
   const classGroup = (student.classGroup || '').trim().toUpperCase()
 
@@ -753,6 +867,19 @@ function balanceGroupsWithOffset(
           continue
         }
 
+        // Block collision guard: automatic balancing must never place a student into a block
+        // they already occupy with a different subject. (Manual overrides may still do this.)
+        const studentAlreadyInTargetBlock = Array.from(groupOccupancy.entries()).some(
+          ([occupancyKey, occupants]) => {
+            const [otherSubjectCode, , blockName] = occupancyKey.split('|')
+            return blockName === targetBlock && otherSubjectCode !== subjectCode && occupants.includes(studentId)
+          }
+        )
+        if (studentAlreadyInTargetBlock) {
+          restoreSnapshot()
+          continue
+        }
+
         // Move the stuck student into the newly freed target slot.
         changes.push({
           studentId,
@@ -867,6 +994,9 @@ function balanceGroupsWithOffset(
       })
     }
   })
+
+  // Phase 5: Fix pre-existing block collisions (two subjects in the same block).
+  fixCollisionsInPlace(students, groupOccupancy, changes, studentsById, maxCapacityOffset)
 
   return { changes, overcrowdedCount: overcrowded.length, partnerLookaheadMoves }
 }
@@ -1169,6 +1299,10 @@ function balanceGroups(students: StudentRecord[], debugCallback?: (groups: Array
       }
     })
   })
+
+  // Phase 4: Fix pre-existing block collisions (two subjects in the same block).
+  const studentsById = new Map<string, StudentRecord>(students.map((s) => [s.id, s]))
+  fixCollisionsInPlace(students, groupOccupancy, changes, studentsById)
 
   return { changes, overcrowdedCount: overcrowded.length }
 }
@@ -3053,28 +3187,48 @@ function App() {
               <div className="student-filter-actions">
                 <button
                   type="button"
-                  onClick={() => setShowIncompleteBlocks(!showIncompleteBlocks)}
+                  disabled={studentFilterCounts.missingSubjectsCount === 0}
+                  onClick={() => {
+                    const next = !showIncompleteBlocks
+                    setShowIncompleteBlocks(next)
+                    if (next) { setShowOverloadedStudents(false); setShowBlockCollisions(false); setShowDuplicateSubjects(false) }
+                  }}
                   className={`filter-button ${showIncompleteBlocks ? 'active' : ''}`}
                 >
                   Mangler fag ({studentFilterCounts.missingSubjectsCount})
                 </button>
                 <button
                   type="button"
-                  onClick={() => setShowOverloadedStudents(!showOverloadedStudents)}
+                  disabled={studentFilterCounts.tooManySubjectsCount === 0}
+                  onClick={() => {
+                    const next = !showOverloadedStudents
+                    setShowOverloadedStudents(next)
+                    if (next) { setShowIncompleteBlocks(false); setShowBlockCollisions(false); setShowDuplicateSubjects(false) }
+                  }}
                   className={`filter-button ${showOverloadedStudents ? 'active' : ''}`}
                 >
                   For mange fag ({studentFilterCounts.tooManySubjectsCount})
                 </button>
                 <button
                   type="button"
-                  onClick={() => setShowBlockCollisions(!showBlockCollisions)}
+                  disabled={studentFilterCounts.blockCollisionsCount === 0}
+                  onClick={() => {
+                    const next = !showBlockCollisions
+                    setShowBlockCollisions(next)
+                    if (next) { setShowIncompleteBlocks(false); setShowOverloadedStudents(false); setShowDuplicateSubjects(false) }
+                  }}
                   className={`filter-button ${showBlockCollisions ? 'active' : ''}`}
                 >
                   Blokk-kollisjoner ({studentFilterCounts.blockCollisionsCount})
                 </button>
                 <button
                   type="button"
-                  onClick={() => setShowDuplicateSubjects(!showDuplicateSubjects)}
+                  disabled={studentFilterCounts.duplicateSubjectsCount === 0}
+                  onClick={() => {
+                    const next = !showDuplicateSubjects
+                    setShowDuplicateSubjects(next)
+                    if (next) { setShowIncompleteBlocks(false); setShowOverloadedStudents(false); setShowBlockCollisions(false) }
+                  }}
                   className={`filter-button ${showDuplicateSubjects ? 'active' : ''}`}
                 >
                   Duplikater ({studentFilterCounts.duplicateSubjectsCount})

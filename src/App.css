@@ -259,6 +259,12 @@ button {
   color: #f8fbff;
 }
 
+.filter-button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
 .blokkfag-checkbox {
   display: flex;
   align-items: center;
