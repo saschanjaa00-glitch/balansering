@@ -91,11 +91,19 @@ type BalanceChange = {
   toBlock: string
 }
 
+type CollisionError = {
+  studentId: string
+  studentName: string
+  classGroup: string
+  subjects: Array<{ subjectCode: string; subjectName: string; block: string }>
+}
+
 type BalanceResultRun = {
   id: string
   createdAt: string
   message: string
   changes: BalanceChange[]
+  collisionErrors?: CollisionError[]
 }
 
 type HistorySnapshot = {
@@ -416,7 +424,8 @@ function fixCollisionsInPlace(
   changes: BalanceChange[],
   studentsLookup: Map<string, StudentRecord>,
   maxCapacityOffset: number = 0
-): void {
+): CollisionError[] {
+  const unresolvable: CollisionError[] = []
   // Build a live view: studentId -> block -> [{subjectCode, subjectName, groupCode}]
   const studentBlocks = new Map<string, Map<string, Array<{ subjectCode: string; subjectName: string; groupCode: string }>>>()
 
@@ -512,8 +521,27 @@ function fixCollisionsInPlace(
         const remaining = blockMap.get(collidingBlock)
         if (!remaining || remaining.length < 2) break
       }
+
+      // After trying all subjects, if the block still has a collision it is unresolvable.
+      const stillColliding = blockMap.get(collidingBlock)
+      if (stillColliding && stillColliding.length >= 2) {
+        const classGroup = (student.classGroup || '').trim()
+        const existing = unresolvable.find((e) => e.studentId === studentId)
+        const errorSubjects = stillColliding.map((s) => ({ subjectCode: s.subjectCode, subjectName: s.subjectName, block: collidingBlock }))
+        if (existing) {
+          for (const es of errorSubjects) {
+            if (!existing.subjects.some((x) => x.subjectCode === es.subjectCode && x.block === es.block)) {
+              existing.subjects.push(es)
+            }
+          }
+        } else {
+          unresolvable.push({ studentId, studentName: student.fullName, classGroup, subjects: errorSubjects })
+        }
+      }
     })
   })
+
+  return unresolvable
 }
 
 function canStudentMoveToBlock(student: StudentRecord, targetBlock: string): boolean {
@@ -996,19 +1024,20 @@ function balanceGroupsWithOffset(
   })
 
   // Phase 5: Fix pre-existing block collisions (two subjects in the same block).
-  fixCollisionsInPlace(students, groupOccupancy, changes, studentsById, maxCapacityOffset)
+  const collisionErrors = fixCollisionsInPlace(students, groupOccupancy, changes, studentsById, maxCapacityOffset)
 
-  return { changes, overcrowdedCount: overcrowded.length, partnerLookaheadMoves }
+  return { changes, overcrowdedCount: overcrowded.length, partnerLookaheadMoves, collisionErrors }
 }
 
 function progressiveBalanceGroups(
   students: StudentRecord[],
   maxOffset: number,
   debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void
-): { allChanges: BalanceChange[]; summary: string } {
+): { allChanges: BalanceChange[]; summary: string; collisionErrors: CollisionError[] } {
   const allChanges: BalanceChange[] = []
   const offsets = []
   let totalPartnerLookaheadMoves = 0
+  const allCollisionErrors: CollisionError[] = []
   
   // Generate offsets from maxOffset down to 0
   for (let i = maxOffset; i <= 0; i++) {
@@ -1021,6 +1050,13 @@ function progressiveBalanceGroups(
   for (const offset of offsets) {
     const result = balanceGroupsWithOffset(currentStudents, offset, debugCallback)
     totalPartnerLookaheadMoves += result.partnerLookaheadMoves
+
+    // Merge collision errors, keeping only those still unresolved.
+    for (const err of result.collisionErrors) {
+      if (!allCollisionErrors.some((e) => e.studentId === err.studentId)) {
+        allCollisionErrors.push(err)
+      }
+    }
     
     if (result.changes.length > 0) {
       // Apply the changes to get the new student state for next iteration
@@ -1035,7 +1071,7 @@ function progressiveBalanceGroups(
   const uniqueStudents = new Set(allChanges.map((c) => c.studentId))
   const summary = `Progressiv balansering fullført: ${uniqueStudents.size} elev(er) flyttet (${allChanges.length} fagendringer, ${totalPartnerLookaheadMoves} partner-lookahead)`
 
-  return { allChanges, summary }
+  return { allChanges, summary, collisionErrors: allCollisionErrors }
 }
 
 // Advanced timeslot-based balancing algorithm
@@ -1302,9 +1338,9 @@ function balanceGroups(students: StudentRecord[], debugCallback?: (groups: Array
 
   // Phase 4: Fix pre-existing block collisions (two subjects in the same block).
   const studentsById = new Map<string, StudentRecord>(students.map((s) => [s.id, s]))
-  fixCollisionsInPlace(students, groupOccupancy, changes, studentsById)
+  const collisionErrors = fixCollisionsInPlace(students, groupOccupancy, changes, studentsById)
 
-  return { changes, overcrowdedCount: overcrowded.length }
+  return { changes, overcrowdedCount: overcrowded.length, collisionErrors }
 }
 
 function applyBalanceChanges(students: StudentRecord[], changes: BalanceChange[]): StudentRecord[] {
@@ -2899,9 +2935,9 @@ function App() {
     return Array.from(grouped.values()).sort((a, b) => a.studentName.localeCompare(b.studentName, 'nb-NO'))
   }, [balanceHistory, parsedData])
 
-  const appendBalanceHistoryRun = (changes: BalanceChange[], message: string): void => {
+  const appendBalanceHistoryRun = (changes: BalanceChange[], message: string, collisionErrors?: CollisionError[]): void => {
     const summarized = summarizeBalanceChanges(changes)
-    if (summarized.length === 0) {
+    if (summarized.length === 0 && (!collisionErrors || collisionErrors.length === 0)) {
       return
     }
 
@@ -2910,6 +2946,7 @@ function App() {
       createdAt: new Date().toISOString(),
       message,
       changes: summarized,
+      ...(collisionErrors && collisionErrors.length > 0 ? { collisionErrors } : {}),
     }
 
     setBalanceHistory((previous) => [...previous, run])
@@ -3445,8 +3482,11 @@ function App() {
                     } else {
                       const uniqueStudents = new Set(result.changes.map((c) => c.studentId))
                       nextBalanceMessage = `Fant ${result.overcrowdedCount} overfull(e) gruppe(r). Flyttet ${uniqueStudents.size} elev(er) (${result.changes.length} fagendringer).`
-                      appendBalanceHistoryRun(result.changes, nextBalanceMessage)
                     }
+                    if (result.collisionErrors && result.collisionErrors.length > 0) {
+                      nextBalanceMessage += ` ${result.collisionErrors.length} elev(er) har uløsbare blokk-kollisjoner.`
+                    }
+                    appendBalanceHistoryRun(result.changes, nextBalanceMessage, result.collisionErrors)
                     setBalanceMessage(nextBalanceMessage)
                     }}
                     className="balance-button"
@@ -3499,6 +3539,43 @@ function App() {
                       Ingen netto fagendringer etter oppsummering av mellomsteg.
                     </p>
                   )}
+                  {(() => {
+                    const allErrors: CollisionError[] = []
+                    const seenIds = new Set<string>()
+                    for (const run of [...balanceHistory].reverse()) {
+                      for (const err of run.collisionErrors ?? []) {
+                        if (!seenIds.has(err.studentId)) {
+                          seenIds.add(err.studentId)
+                          allErrors.push(err)
+                        }
+                      }
+                    }
+                    if (allErrors.length === 0) return null
+                    return (
+                      <div className="collision-error-section">
+                        <strong className="collision-error-heading">
+                          ⚠ Uløsbare blokk-kollisjoner ({allErrors.length} elev{allErrors.length === 1 ? '' : 'er'})
+                        </strong>
+                        <p className="collision-error-desc">
+                          Disse elevene har valgt fag som ikke kan plasseres i ulike blokker med gjeldende gruppetilbud. Manuell overstyring er nødvendig.
+                        </p>
+                        <div className="balance-list">
+                          {allErrors.map((err) => (
+                            <div key={err.studentId} className="balance-item collision-error-item">
+                              <strong>{err.studentName}</strong> ({err.classGroup || '-'}) — {err.studentId}
+                              <ul className="collision-error-subjects">
+                                {err.subjects.map((s) => (
+                                  <li key={`${s.subjectCode}-${s.block}`}>
+                                    {s.subjectName || s.subjectCode} ({s.block})
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  })()}
                   {balanceResults !== null && balanceResults.length === 0 && debugGroups.length > 0 && (
                     <>
                       <p style={{ fontSize: '0.9rem', color: '#666', marginBottom: '0.8rem' }}>
@@ -4187,7 +4264,7 @@ function App() {
                             }
                             
                             setBalanceMessage(result.summary)
-                            appendBalanceHistoryRun(result.allChanges, result.summary)
+                            appendBalanceHistoryRun(result.allChanges, result.summary, result.collisionErrors)
                             setShowProgressiveBalanceDialog(false)
                           }}
                           className="balance-button"

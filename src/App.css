@@ -415,6 +415,40 @@ button {
   border-bottom: none;
 }
 
+.collision-error-section {
+  margin-bottom: 0.9rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid #f5c2c7;
+  border-radius: 8px;
+  background: #fff5f5;
+}
+
+.collision-error-heading {
+  display: block;
+  font-size: 0.95rem;
+  color: #b91c1c;
+  margin-bottom: 0.3rem;
+}
+
+.collision-error-desc {
+  font-size: 0.82rem;
+  color: #7f1d1d;
+  margin: 0 0 0.5rem;
+}
+
+.collision-error-item {
+  background: #fef2f2;
+  border-radius: 4px;
+}
+
+.collision-error-subjects {
+  margin: 0.25rem 0 0 1rem;
+  padding: 0;
+  list-style: disc;
+  font-size: 0.85rem;
+  color: #b91c1c;
+}
+
 .balance-run-segment {
   margin-top: 0.45rem;
   padding-top: 0.45rem;
