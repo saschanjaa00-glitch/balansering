@@ -3010,29 +3010,17 @@ function App() {
       })
   }, [parsedData, filteredSubjects, perSubjectBlockColumns])
 
-  const updateBlockSubjectCapacityOverride = (subjectCode: string, block: string, nextValue: string): void => {
+  const toggleDoubleBlockSubjectCapacity = (subjectName: string, subjectCode: string, block: string): void => {
     const key = `${subjectCode}|${block}`
-    const parsedValue = Number(nextValue)
+    const doubledCapacity = getMaxCapacityForSubject(subjectName) * 2
 
     setBlockSubjectCapacityOverrides((previous) => {
       const next = { ...previous }
-      if (!nextValue.trim() || !Number.isFinite(parsedValue) || parsedValue <= 0) {
+      if (Object.prototype.hasOwnProperty.call(next, key)) {
         delete next[key]
-        return next
+      } else {
+        next[key] = doubledCapacity
       }
-      next[key] = Math.round(parsedValue)
-      return next
-    })
-  }
-
-  const clearBlockSubjectCapacityOverride = (subjectCode: string, block: string): void => {
-    const key = `${subjectCode}|${block}`
-    setBlockSubjectCapacityOverrides((previous) => {
-      if (!(key in previous)) {
-        return previous
-      }
-      const next = { ...previous }
-      delete next[key]
       return next
     })
   }
@@ -4298,28 +4286,15 @@ function App() {
                           <td key={`${row.subject.code}-${block}`} className={isOverLimit ? 'subject-over-limit' : ''}>
                             {hasGroup ? (
                               <div className="per-fag-capacity-cell">
-                                <span>{count}</span>
-                                <span className="per-fag-capacity-divider">/</span>
-                                <input
-                                  type="number"
-                                  min={1}
-                                  step={1}
-                                  value={hasOverride ? maxCap : ''}
-                                  placeholder={String(getMaxCapacityForSubject(row.subject.name))}
-                                  onChange={(event) => updateBlockSubjectCapacityOverride(row.subject.code, block, event.target.value)}
-                                  className="per-fag-capacity-input"
-                                  title="Maks kapasitet for dette fag/blokk"
-                                />
-                                {hasOverride && (
-                                  <button
-                                    type="button"
-                                    className="per-fag-capacity-reset"
-                                    onClick={() => clearBlockSubjectCapacityOverride(row.subject.code, block)}
-                                    title="Fjern manuell kapasitet"
-                                  >
-                                    x
-                                  </button>
-                                )}
+                                <span>{count} / {maxCap}</span>
+                                <button
+                                  type="button"
+                                  className="per-fag-capacity-toggle"
+                                  onClick={() => toggleDoubleBlockSubjectCapacity(row.subject.name, row.subject.code, block)}
+                                  title={hasOverride ? 'Tilbakestill til standard maks' : 'Doble maks for dette fag/blokk'}
+                                >
+                                  {hasOverride ? '1x' : '2x'}
+                                </button>
                               </div>
                             ) : '-'}
                           </td>

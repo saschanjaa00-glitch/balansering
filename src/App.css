@@ -791,14 +791,7 @@ th {
   color: #6a7b95;
 }
 
-.per-fag-capacity-input {
-  width: 3.5rem;
-  padding: 0.2rem 0.34rem;
-  font-size: 0.78rem;
-  border-radius: 8px;
-}
-
-.per-fag-capacity-reset {
+.per-fag-capacity-toggle {
   padding: 0.12rem 0.32rem;
   font-size: 0.72rem;
   border-radius: 8px;
@@ -808,7 +801,7 @@ th {
   line-height: 1.2;
 }
 
-.per-fag-capacity-reset:hover {
+.per-fag-capacity-toggle:hover {
   background: #ebf2fa;
 }
 
