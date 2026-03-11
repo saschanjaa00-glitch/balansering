@@ -781,6 +781,57 @@ th {
   font-weight: 700;
 }
 
+.per-fag-capacity-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+}
+
+.per-fag-capacity-divider {
+  color: #6a7b95;
+}
+
+.per-fag-capacity-input {
+  width: 3.5rem;
+  padding: 0.2rem 0.34rem;
+  font-size: 0.78rem;
+  border-radius: 8px;
+}
+
+.per-fag-capacity-reset {
+  padding: 0.12rem 0.32rem;
+  font-size: 0.72rem;
+  border-radius: 8px;
+  background: #f4f8fd;
+  color: #20324d;
+  border: 1px solid #c2d0df;
+  line-height: 1.2;
+}
+
+.per-fag-capacity-reset:hover {
+  background: #ebf2fa;
+}
+
+.per-fag-cell-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.per-fag-split-toggle {
+  border: 1px solid #c2d0df;
+  background: #f4f8fd;
+  color: #20324d;
+  border-radius: 999px;
+  padding: 0.04rem 0.42rem;
+  font-size: 0.72rem;
+  line-height: 1.25;
+}
+
+.per-fag-split-toggle:hover {
+  background: #ebf2fa;
+}
+
 .per-faggruppe-toolbar {
   margin: 0.2rem 0 0.34rem;
   display: flex;

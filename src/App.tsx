@@ -190,6 +190,7 @@ type PersistedUiState = {
   showBlockCollisions: boolean
   showDuplicateSubjects: boolean
   perFaggruppeSortBy?: 'blokk' | 'tittel' | 'students' | 'change'
+  blockSubjectCapacityOverrides?: Record<string, number>
 }
 
 type BytteSubjectVisibility = Record<string, { vg2: boolean; vg3: boolean }>
@@ -365,6 +366,23 @@ function getMaxCapacityForSubject(subjectName: string): number {
   return SUBJECT_MAX_CAPACITY[subjectName] || 30
 }
 
+function getMaxCapacityForSubjectBlock(
+  subjectName: string,
+  subjectCode: string,
+  block: string,
+  maxCapacityOffset: number = 0,
+  blockSubjectCapacityOverrides?: Record<string, number>
+): number {
+  const key = `${subjectCode}|${block}`
+  const rawOverride = blockSubjectCapacityOverrides?.[key]
+  const normalizedOverride =
+    typeof rawOverride === 'number' && Number.isFinite(rawOverride) && rawOverride > 0
+      ? Math.round(rawOverride)
+      : null
+  const baseCapacity = normalizedOverride ?? getMaxCapacityForSubject(subjectName)
+  return baseCapacity + maxCapacityOffset
+}
+
 function countNumberedBlockAssignments(student: StudentRecord): number {
   return student.assignments.filter((assignment) => /^Blokk [1-4]$/u.test(assignment.block)).length
 }
@@ -426,7 +444,8 @@ function fixCollisionsInPlace(
   groupOccupancy: Map<string, string[]>,
   changes: BalanceChange[],
   studentsLookup: Map<string, StudentRecord>,
-  maxCapacityOffset: number = 0
+  maxCapacityOffset: number = 0,
+  blockSubjectCapacityOverrides?: Record<string, number>
 ): CollisionError[] {
   const unresolvable: CollisionError[] = []
   // Build a live view: studentId -> block -> [{subjectCode, subjectName, groupCode}]
@@ -481,7 +500,13 @@ function fixCollisionsInPlace(
 
       // Try to move each subject out of the colliding block (try last first).
       for (const { subjectCode, subjectName, groupCode } of [...subjects].reverse()) {
-        const maxCap = getMaxCapacityForSubject(subjectName) + maxCapacityOffset
+        const maxCap = getMaxCapacityForSubjectBlock(
+          subjectName,
+          subjectCode,
+          collidingBlock,
+          maxCapacityOffset,
+          blockSubjectCapacityOverrides,
+        )
 
         // Pass 1: prefer a group within capacity.
         let moved = false
@@ -567,7 +592,8 @@ function balanceGroupsWithOffset(
   students: StudentRecord[],
   availableGroups: GroupBreakdownRecord[] = [],
   maxCapacityOffset: number = 0,
-  debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void
+  debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void,
+  blockSubjectCapacityOverrides?: Record<string, number>
 ): { changes: BalanceChange[]; overcrowdedCount: number; partnerLookaheadMoves: number; collisionErrors: CollisionError[] } {
   const changes: BalanceChange[] = []
   const debugGroups: Array<{ key: string; count: number; maxCap: number; status: string }> = []
@@ -588,12 +614,18 @@ function balanceGroupsWithOffset(
   // Find overcrowded groups
   const overcrowded: Array<{ key: string; count: number; studentIds: string[] }> = []
   groupOccupancy.forEach((studentIds, key) => {
-    const [subjectCode] = key.split('|')
+    const [subjectCode, , block] = key.split('|')
     const subjectName = students
       .flatMap((s) => s.assignments)
       .find((a) => a.subjectCode === subjectCode)?.subjectName || 'UKJENT'
 
-    const maxCap = getMaxCapacityForSubject(subjectName) + maxCapacityOffset
+    const maxCap = getMaxCapacityForSubjectBlock(
+      subjectName,
+      subjectCode,
+      block,
+      maxCapacityOffset,
+      blockSubjectCapacityOverrides,
+    )
     const status = studentIds.length > maxCap ? `OVERFULL (${studentIds.length} > ${maxCap})` : `OK (${studentIds.length} ≤ ${maxCap})`
     
     debugGroups.push({ key, count: studentIds.length, maxCap, status })
@@ -725,7 +757,13 @@ function balanceGroupsWithOffset(
         }
 
         const targetSubjectName = targetSubject.subjectName
-        const targetMaxCap = getMaxCapacityForSubject(targetSubjectName) + maxCapacityOffset
+        const targetMaxCap = getMaxCapacityForSubjectBlock(
+          targetSubjectName,
+          targetSubject.subjectCode,
+          toBlock,
+          maxCapacityOffset,
+          blockSubjectCapacityOverrides,
+        )
         const groupsInToBlock: Array<{ key: string; currentSize: number }> = []
 
         groupOccupancy.forEach((occupants, key) => {
@@ -935,7 +973,13 @@ function balanceGroupsWithOffset(
   overcrowded.forEach(({ key, count, studentIds }) => {
     const [subjectCode, groupCode, block] = key.split('|')
     const subjectName = students.flatMap((s) => s.assignments).find((a) => a.subjectCode === subjectCode)?.subjectName || ''
-    const maxCap = getMaxCapacityForSubject(subjectName) + maxCapacityOffset
+    const maxCap = getMaxCapacityForSubjectBlock(
+      subjectName,
+      subjectCode,
+      block,
+      maxCapacityOffset,
+      blockSubjectCapacityOverrides,
+    )
     const needToMove = count - maxCap
 
     let moved = 0
@@ -1018,7 +1062,14 @@ function balanceGroupsWithOffset(
   })
 
   // Phase 5: Fix pre-existing block collisions (two subjects in the same block).
-  const collisionErrors = fixCollisionsInPlace(students, groupOccupancy, changes, studentsById, maxCapacityOffset)
+  const collisionErrors = fixCollisionsInPlace(
+    students,
+    groupOccupancy,
+    changes,
+    studentsById,
+    maxCapacityOffset,
+    blockSubjectCapacityOverrides,
+  )
 
   return { changes, overcrowdedCount: overcrowded.length, partnerLookaheadMoves, collisionErrors }
 }
@@ -1027,12 +1078,12 @@ function progressiveBalanceGroups(
   students: StudentRecord[],
   availableGroups: GroupBreakdownRecord[] = [],
   maxOffset: number,
-  debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void
+  debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void,
+  blockSubjectCapacityOverrides?: Record<string, number>
 ): { allChanges: BalanceChange[]; summary: string; collisionErrors: CollisionError[] } {
   const allChanges: BalanceChange[] = []
   const offsets = []
   let totalPartnerLookaheadMoves = 0
-  const allCollisionErrors: CollisionError[] = []
   
   // Generate offsets from maxOffset down to 0
   for (let i = maxOffset; i <= 0; i++) {
@@ -1043,15 +1094,14 @@ function progressiveBalanceGroups(
   let currentStudents = students
   
   for (const offset of offsets) {
-    const result = balanceGroupsWithOffset(currentStudents, availableGroups, offset, debugCallback)
+    const result = balanceGroupsWithOffset(
+      currentStudents,
+      availableGroups,
+      offset,
+      debugCallback,
+      blockSubjectCapacityOverrides,
+    )
     totalPartnerLookaheadMoves += result.partnerLookaheadMoves
-
-    // Merge collision errors, keeping only those still unresolved.
-    for (const err of result.collisionErrors) {
-      if (!allCollisionErrors.some((e) => e.studentId === err.studentId)) {
-        allCollisionErrors.push(err)
-      }
-    }
     
     if (result.changes.length > 0) {
       // Apply the changes to get the new student state for next iteration
@@ -1063,10 +1113,19 @@ function progressiveBalanceGroups(
     }
   }
 
+  // Report collisions from final student state only.
+  const finalCollisionErrors = balanceGroupsWithOffset(
+    currentStudents,
+    availableGroups,
+    0,
+    undefined,
+    blockSubjectCapacityOverrides,
+  ).collisionErrors
+
   const uniqueStudents = new Set(allChanges.map((c) => c.studentId))
   const summary = `Progressiv balansering fullført: ${uniqueStudents.size} elev(er) flyttet (${allChanges.length} fagendringer, ${totalPartnerLookaheadMoves} partner-lookahead)`
 
-  return { allChanges, summary, collisionErrors: allCollisionErrors }
+  return { allChanges, summary, collisionErrors: finalCollisionErrors }
 }
 
 // Advanced timeslot-based balancing algorithm
@@ -2224,13 +2283,6 @@ function parseAssignmentKey(key: string): { subjectCode: string; groupCode: stri
   return { subjectCode, groupCode, block }
 }
 
-function parseStudentCsv(value: string): string[] {
-  return value
-    .split(',')
-    .map((item) => item.trim())
-    .filter((item) => /^\d+$/u.test(item))
-}
-
 function computeTotalDeltaCounts(parsedData: ParsedData): {
   groupDeltas: Map<string, number>
   blockDeltas: Map<string, number>
@@ -2301,6 +2353,21 @@ function buildExportText(parsedData: ParsedData): string {
   const removalsByPair = new Map<string, number>()
   const additionsByPair = new Map<string, number>()
   const affectedGroups = new Set<string>()
+  const currentMembersByGroupCode = new Map<string, string[]>()
+
+  parsedData.students.forEach((student) => {
+    student.assignments.forEach((assignment) => {
+      if (!currentMembersByGroupCode.has(assignment.groupCode)) {
+        currentMembersByGroupCode.set(assignment.groupCode, [])
+      }
+      currentMembersByGroupCode.get(assignment.groupCode)?.push(student.id)
+    })
+  })
+
+  currentMembersByGroupCode.forEach((studentIds, groupCode) => {
+    const uniqueSortedStudents = Array.from(new Set(studentIds)).sort((a, b) => Number(a) - Number(b))
+    currentMembersByGroupCode.set(groupCode, uniqueSortedStudents)
+  })
 
   const allStudentIds = new Set<string>([
     ...Object.keys(parsedData.initialAssignmentKeysByStudent),
@@ -2365,43 +2432,19 @@ function buildExportText(parsedData: ParsedData): string {
   }
 
   const groupTable = tables.Group
-  if (groupTable && affectedGroups.size > 0) {
+  if (groupTable) {
     const groupColumnIndex = groupTable.columnsSanitized.findIndex((name) => name === 'Group')
     const studentColumnIndex = groupTable.columnsSanitized.findIndex((name) => name === 'Student')
 
     if (groupColumnIndex >= 0 && studentColumnIndex >= 0) {
       groupTable.rows = groupTable.rows.map((row) => {
         const groupCode = (row[groupColumnIndex] || '').trim()
-        if (!affectedGroups.has(groupCode)) {
+        if (!groupCode) {
           return row
         }
 
-        const nextStudents = parseStudentCsv(row[studentColumnIndex] || '')
-        const studentSet = new Set(nextStudents)
-
-        removalsByPair.forEach((count, pairKey) => {
-          if (count <= 0) {
-            return
-          }
-          const [pairGroupCode, studentId] = pairKey.split('|')
-          if (pairGroupCode === groupCode) {
-            studentSet.delete(studentId)
-          }
-        })
-
-        additionsByPair.forEach((count, pairKey) => {
-          if (count <= 0) {
-            return
-          }
-          const [pairGroupCode, studentId] = pairKey.split('|')
-          if (pairGroupCode === groupCode) {
-            studentSet.add(studentId)
-          }
-        })
-
-        const orderedStudents = [...studentSet].sort((a, b) => Number(a) - Number(b))
         const nextRow = [...row]
-        nextRow[studentColumnIndex] = orderedStudents.join(',')
+        nextRow[studentColumnIndex] = (currentMembersByGroupCode.get(groupCode) || []).join(',')
         return nextRow
       })
     }
@@ -2444,6 +2487,7 @@ function App() {
       showOverloadedStudents: false,
       showBlockCollisions: false,
       showDuplicateSubjects: false,
+      blockSubjectCapacityOverrides: {},
     })
   )
 
@@ -2464,6 +2508,9 @@ function App() {
   const [showDuplicateSubjects, setShowDuplicateSubjects] = useState<boolean>(persistedUiState.showDuplicateSubjects)
   const [perFaggruppeSortBy, setPerFaggruppeSortBy] = useState<'blokk' | 'tittel' | 'students' | 'change'>(
     persistedUiState.perFaggruppeSortBy ?? 'blokk',
+  )
+  const [blockSubjectCapacityOverrides, setBlockSubjectCapacityOverrides] = useState<Record<string, number>>(
+    persistedUiState.blockSubjectCapacityOverrides ?? {},
   )
   const [balanceResults, setBalanceResults] = useState<BalanceChange[] | null>(null)
   const [balanceHistory, setBalanceHistory] = useState<BalanceResultRun[]>(() => {
@@ -2536,6 +2583,7 @@ function App() {
     setShowBlockCollisions(false)
     setShowDuplicateSubjects(false)
     setPerFaggruppeSortBy('blokk')
+    setBlockSubjectCapacityOverrides({})
     setBalanceResults(null)
     setBalanceHistory([])
     setBalanceMessage('')
@@ -2693,9 +2741,10 @@ function App() {
       showBlockCollisions,
       showDuplicateSubjects,
       perFaggruppeSortBy,
+      blockSubjectCapacityOverrides,
     }
     saveToLocalStorage(STORAGE_KEYS.uiState, stateToPersist)
-  }, [selectedStudentId, studentQuery, subjectQuery, blockFilter, viewMode, onlyBlokkfag, showIncompleteBlocks, showOverloadedStudents, showBlockCollisions, showDuplicateSubjects, perFaggruppeSortBy])
+  }, [selectedStudentId, studentQuery, subjectQuery, blockFilter, viewMode, onlyBlokkfag, showIncompleteBlocks, showOverloadedStudents, showBlockCollisions, showDuplicateSubjects, perFaggruppeSortBy, blockSubjectCapacityOverrides])
 
   const selectedStudent = useMemo(() => {
     if (!parsedData || !selectedStudentId) {
@@ -2915,26 +2964,19 @@ function App() {
     if (!parsedData) {
       return [] as Array<{
         subject: SubjectRecord
-        maxCap: number
         countsByBlock: Map<string, number>
         hasGroupByBlock: Map<string, boolean>
         total: number
-        isOverfilled: boolean
       }>
     }
 
     const countsBySubjectBlock = new Map<string, number>()
     const hasGroupBySubjectBlock = new Set<string>()
-    const overfilledSubjectCodes = new Set<string>()
 
     parsedData.groupBreakdowns.forEach((group) => {
       const key = `${group.subjectCode}|${group.block}`
       countsBySubjectBlock.set(key, (countsBySubjectBlock.get(key) || 0) + group.studentCount)
       hasGroupBySubjectBlock.add(key)
-
-      if (group.studentCount > getMaxCapacityForSubject(group.subjectName)) {
-        overfilledSubjectCodes.add(group.subjectCode)
-      }
     })
 
     return filteredSubjects
@@ -2942,7 +2984,6 @@ function App() {
       .filter((subject) => !EXCLUDED_SUBJECT_TITLES_IN_OVERVIEW.has(subject.name))
       .sort((a, b) => a.name.localeCompare(b.name, 'nb-NO'))
       .map((subject) => {
-        const maxCap = getMaxCapacityForSubject(subject.name)
         const countsByBlock = new Map<string, number>()
         const hasGroupByBlock = new Map<string, boolean>()
 
@@ -2962,14 +3003,39 @@ function App() {
 
         return {
           subject,
-          maxCap,
           countsByBlock,
           hasGroupByBlock,
           total,
-          isOverfilled: overfilledSubjectCodes.has(subject.code),
         }
       })
   }, [parsedData, filteredSubjects, perSubjectBlockColumns])
+
+  const updateBlockSubjectCapacityOverride = (subjectCode: string, block: string, nextValue: string): void => {
+    const key = `${subjectCode}|${block}`
+    const parsedValue = Number(nextValue)
+
+    setBlockSubjectCapacityOverrides((previous) => {
+      const next = { ...previous }
+      if (!nextValue.trim() || !Number.isFinite(parsedValue) || parsedValue <= 0) {
+        delete next[key]
+        return next
+      }
+      next[key] = Math.round(parsedValue)
+      return next
+    })
+  }
+
+  const clearBlockSubjectCapacityOverride = (subjectCode: string, block: string): void => {
+    const key = `${subjectCode}|${block}`
+    setBlockSubjectCapacityOverrides((previous) => {
+      if (!(key in previous)) {
+        return previous
+      }
+      const next = { ...previous }
+      delete next[key]
+      return next
+    })
+  }
 
   const filteredGroupBreakdowns = useMemo(() => {
     if (!parsedData) {
@@ -4194,17 +4260,68 @@ function App() {
                 </thead>
                 <tbody>
                   {perSubjectMatrixRows.filter((row) => row.total > 0).map((row) => (
-                    <tr key={row.subject.code} className={row.isOverfilled ? 'subject-overfilled-row' : ''}>
+                    <tr
+                      key={row.subject.code}
+                      className={perSubjectBlockColumns.some((block) => {
+                        const hasGroup = row.hasGroupByBlock.get(block) || false
+                        if (!hasGroup) {
+                          return false
+                        }
+                        const count = row.countsByBlock.get(block) || 0
+                        const maxCap = getMaxCapacityForSubjectBlock(
+                          row.subject.name,
+                          row.subject.code,
+                          block,
+                          0,
+                          blockSubjectCapacityOverrides,
+                        )
+                        return count > maxCap
+                      }) ? 'subject-overfilled-row' : ''}
+                    >
                       <td>{row.subject.code}</td>
                       <td>{row.subject.name}</td>
                       {perSubjectBlockColumns.map((block) => {
                         const hasGroup = row.hasGroupByBlock.get(block) || false
                         const count = row.countsByBlock.get(block) || 0
-                        const isOverLimit = hasGroup && count > row.maxCap
+                        const maxCap = getMaxCapacityForSubjectBlock(
+                          row.subject.name,
+                          row.subject.code,
+                          block,
+                          0,
+                          blockSubjectCapacityOverrides,
+                        )
+                        const overrideKey = `${row.subject.code}|${block}`
+                        const hasOverride = Object.prototype.hasOwnProperty.call(blockSubjectCapacityOverrides, overrideKey)
+                        const isOverLimit = hasGroup && count > maxCap
 
                         return (
                           <td key={`${row.subject.code}-${block}`} className={isOverLimit ? 'subject-over-limit' : ''}>
-                            {hasGroup ? count : '-'}
+                            {hasGroup ? (
+                              <div className="per-fag-capacity-cell">
+                                <span>{count}</span>
+                                <span className="per-fag-capacity-divider">/</span>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  step={1}
+                                  value={hasOverride ? maxCap : ''}
+                                  placeholder={String(getMaxCapacityForSubject(row.subject.name))}
+                                  onChange={(event) => updateBlockSubjectCapacityOverride(row.subject.code, block, event.target.value)}
+                                  className="per-fag-capacity-input"
+                                  title="Maks kapasitet for dette fag/blokk"
+                                />
+                                {hasOverride && (
+                                  <button
+                                    type="button"
+                                    className="per-fag-capacity-reset"
+                                    onClick={() => clearBlockSubjectCapacityOverride(row.subject.code, block)}
+                                    title="Fjern manuell kapasitet"
+                                  >
+                                    x
+                                  </button>
+                                )}
+                              </div>
+                            ) : '-'}
                           </td>
                         )
                       })}
@@ -4881,7 +4998,13 @@ function App() {
                           onClick={() => {
                             if (!parsedData) return
 
-                            const result = progressiveBalanceGroups(parsedData.students, parsedData.groupBreakdowns, progressiveBalanceMaxOffset, (groups) => setDebugGroups(groups))
+                            const result = progressiveBalanceGroups(
+                              parsedData.students,
+                              parsedData.groupBreakdowns,
+                              progressiveBalanceMaxOffset,
+                              (groups) => setDebugGroups(groups),
+                              blockSubjectCapacityOverrides,
+                            )
                             setBalanceResults(result.allChanges)
                             
                             // Apply changes to the parsed data
