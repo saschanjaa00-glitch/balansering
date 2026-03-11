@@ -568,7 +568,7 @@ function balanceGroupsWithOffset(
   availableGroups: GroupBreakdownRecord[] = [],
   maxCapacityOffset: number = 0,
   debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void
-): { changes: BalanceChange[]; overcrowdedCount: number; partnerLookaheadMoves: number } {
+): { changes: BalanceChange[]; overcrowdedCount: number; partnerLookaheadMoves: number; collisionErrors: CollisionError[] } {
   const changes: BalanceChange[] = []
   const debugGroups: Array<{ key: string; count: number; maxCap: number; status: string }> = []
   const studentsById = new Map<string, StudentRecord>(students.map((student) => [student.id, student]))
@@ -1071,7 +1071,7 @@ function progressiveBalanceGroups(
 
 // Advanced timeslot-based balancing algorithm
 
-function balanceGroups(students: StudentRecord[], debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void): { changes: BalanceChange[]; overcrowdedCount: number } {
+function balanceGroups(students: StudentRecord[], debugCallback?: (groups: Array<{ key: string; count: number; maxCap: number; status: string }>) => void): { changes: BalanceChange[]; overcrowdedCount: number; collisionErrors: CollisionError[] } {
   const changes: BalanceChange[] = []
   const debugGroups: Array<{ key: string; count: number; maxCap: number; status: string }> = []
 
@@ -1337,6 +1337,8 @@ function balanceGroups(students: StudentRecord[], debugCallback?: (groups: Array
 
   return { changes, overcrowdedCount: overcrowded.length, collisionErrors }
 }
+
+void balanceGroups
 
 function applyBalanceChanges(students: StudentRecord[], changes: BalanceChange[]): StudentRecord[] {
   // Apply each student's changes in order so chained moves land on the final destination.
@@ -3326,6 +3328,8 @@ function App() {
       return [...cleanedHistory, run]
     })
   }
+
+  void appendManualBalanceHistoryRun
 
   const handleExportBalanceResultsWord = (): void => {
     if (balanceHistory.length === 0 && allCollisionErrors.length === 0) {
