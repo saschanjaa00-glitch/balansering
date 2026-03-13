@@ -163,6 +163,85 @@ const EXCLUDED_SUBJECT_TITLES_IN_OVERVIEW = new Set<string>([
   'Toppidrett 3',
 ])
 
+const NON_BLOKKFAG_SUBJECT_NAMES = new Set<string>([
+  'fransk ii',
+  'spansk ii',
+  'tysk ii',
+  'fransk niva iii',
+  'spansk niva iii',
+  'tysk niva iii',
+])
+
+const BYTTE_OPTIONS_HIDDEN_SUBJECT_NAMES = new Set<string>([
+  'fysikk2',
+  'geofag2',
+  'kjemi2',
+  'markedsforingogledelse2',
+  'matematikks2',
+  'matematikkr2',
+  'psykologi2',
+  'rettslaere2',
+  'samfunnsfagligengelsk',
+  'samfunnsokonomi2',
+  'toppidrett1',
+  'biologi2',
+])
+
+const BYTTE_DEFAULT_OFF_BOTH_SUBJECT_NAMES = new Set<string>([
+  'friluftsliv1',
+  'friluftsliv2',
+])
+
+const BYTTE_OVERVIEW_HIDDEN_SUBJECT_NAMES = new Set<string>([
+  'toppidrett3',
+])
+
+function normalizeSubjectNameForRules(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function normalizeSubjectNameCompactForRules(value: string): string {
+  return normalizeSubjectNameForRules(value).replace(/\s+/g, '')
+}
+
+function isTyskIAndIiSubjectName(subjectName: string): boolean {
+  return /^tysk\s*i\s*\+\s*ii$/u.test(normalizeSubjectNameForRules(subjectName))
+}
+
+function isEligibleBlokkfagSubjectName(subjectName: string): boolean {
+  if (isTyskIAndIiSubjectName(subjectName)) {
+    return true
+  }
+  return !NON_BLOKKFAG_SUBJECT_NAMES.has(normalizeSubjectNameForRules(subjectName))
+}
+
+function shouldShowBytteOptionForSubject(subjectName: string): boolean {
+  return !BYTTE_OPTIONS_HIDDEN_SUBJECT_NAMES.has(normalizeSubjectNameCompactForRules(subjectName))
+}
+
+function getDefaultBytteVisibilityForSubject(subjectName: string): { vg2: boolean; vg3: boolean } {
+  const compact = normalizeSubjectNameCompactForRules(subjectName)
+
+  if (BYTTE_DEFAULT_OFF_BOTH_SUBJECT_NAMES.has(compact)) {
+    return { vg2: false, vg3: false }
+  }
+
+  if (BYTTE_OPTIONS_HIDDEN_SUBJECT_NAMES.has(compact)) {
+    return { vg2: false, vg3: true }
+  }
+
+  return { vg2: true, vg3: true }
+}
+
+function shouldShowBytteOverviewSubject(subjectName: string): boolean {
+  return !BYTTE_OVERVIEW_HIDDEN_SUBJECT_NAMES.has(normalizeSubjectNameCompactForRules(subjectName))
+}
+
 const SUBJECT_MAX_CAPACITY: Record<string, number> = {
   'Kjemi 1': 24,
   'Kjemi 2': 24,
@@ -1949,9 +2028,13 @@ function parseNovaschemExport(rawText: string, sourceFileName: string): ParsedDa
     if (!subjectCode || !block || EXCLUDED_SUBJECTS.has(subjectCode)) {
       return
     }
+    const subjectName = subjectsByCode.get(subjectCode) || subjectCode
+    if (!isEligibleBlokkfagSubjectName(subjectName)) {
+      return
+    }
     if (!availableSubjectBlocks.has(subjectCode)) {
       availableSubjectBlocks.set(subjectCode, {
-        name: subjectsByCode.get(subjectCode) || subjectCode,
+        name: subjectName,
         blocks: new Set<string>(),
       })
     }
@@ -2124,7 +2207,7 @@ function parseNovaschemExport(rawText: string, sourceFileName: string): ParsedDa
 
       const summary = subjectSummary.get(assignment.subjectCode)
       summary?.students.add(student.id)
-      if (assignment.block) {
+      if (assignment.block && isEligibleBlokkfagSubjectName(assignment.subjectName)) {
         summary?.blocks.add(assignment.block)
       }
 
@@ -2202,7 +2285,7 @@ function parseNovaschemExport(rawText: string, sourceFileName: string): ParsedDa
   const blockSummary = new Map<string, { subjects: Set<string>; groups: Set<string>; students: Set<string> }>()
   students.forEach((student) => {
     student.assignments.forEach((assignment) => {
-      if (!assignment.block) {
+      if (!assignment.block || !isEligibleBlokkfagSubjectName(assignment.subjectName)) {
         return
       }
       if (!blockSummary.has(assignment.block)) {
@@ -2710,7 +2793,7 @@ function App() {
 
       for (const subject of parsedData.subjects) {
         const existing = previous[subject.code]
-        next[subject.code] = existing ?? { vg2: true, vg3: true }
+        next[subject.code] = existing ?? getDefaultBytteVisibilityForSubject(subject.name)
       }
 
       const hasSameEntries = Object.keys(previous).length === Object.keys(next).length
@@ -2839,7 +2922,10 @@ function App() {
         assignment.subjectCode.toLowerCase().includes(needle) ||
         assignment.subjectName.toLowerCase().includes(needle)
       const matchesBlock = !blockFilter || assignment.block === blockFilter
-      const isBlokkfag = assignment.block && assignment.block.trim().length > 0
+      const isBlokkfag =
+        assignment.block &&
+        assignment.block.trim().length > 0 &&
+        isEligibleBlokkfagSubjectName(assignment.subjectName)
       return matchesSubject && matchesBlock && (!onlyBlokkfag || isBlokkfag)
     })
 
@@ -2881,7 +2967,10 @@ function App() {
         const matchesSearch =
           !needle || subject.code.toLowerCase().includes(needle) || subject.name.toLowerCase().includes(needle)
         const matchesBlock = !blockFilter || subject.blocks.includes(blockFilter)
-        const isBlokkfag = subject.blocks && subject.blocks.length > 0
+        const isBlokkfag =
+          subject.blocks &&
+          subject.blocks.length > 0 &&
+          isEligibleBlokkfagSubjectName(subject.name)
         return matchesSearch && matchesBlock && (!onlyBlokkfag || isBlokkfag)
       })
       .sort((a, b) => {
@@ -3524,8 +3613,11 @@ function App() {
       vg3OnlySubjects.has(normalizeSubjectName(subjectName))
 
     const allSubjects = parsedData.subjects
-      .filter((subject) => Array.isArray(subject.blocks) && subject.blocks.length > 0)
-      .filter((subject) => subject.blocks.some((block) => !block.toLowerCase().includes('matte')))
+      .filter((subject) => {
+        const blocks = Array.isArray(subject.blocks) ? subject.blocks : []
+        const isBlokkfag = blocks.length > 0 && blocks.some((block) => !block.toLowerCase().includes('matte'))
+        return isBlokkfag && isEligibleBlokkfagSubjectName(subject.name)
+      })
       .slice()
       .sort((a, b) => a.name.localeCompare(b.name, 'nb-NO'))
 
@@ -3557,6 +3649,7 @@ function App() {
       .map((block) => {
         const subjectNames = allSubjects
           .filter((subject) => subject.blocks.includes(block))
+          .filter((subject) => shouldShowBytteOverviewSubject(subject.name))
           .filter((subject) => (section === 'vg2' ? !isVg3OnlySubject(subject.name) : true))
           .filter((subject) => (bytteSubjectVisibility[subject.code]?.[section] ?? true))
           .map((subject) => formatSubjectDisplayName(subject.name))
@@ -5175,10 +5268,14 @@ function App() {
                 const isVg3OnlySubject = (subjectName: string): boolean =>
                   vg3OnlySubjects.has(normalizeSubjectName(subjectName))
 
-                // Only show blokkfag in Bytteoversikt and its options.
+                // Only show blokkfag in Bytteoversikt and its options, with explicit
+                // exception for Tysk I+II.
                 const allSubjects = (parsedData?.subjects || [])
-                  .filter((subject) => Array.isArray(subject.blocks) && subject.blocks.length > 0)
-                  .filter((subject) => subject.blocks.some((block) => !block.toLowerCase().includes('matte')))
+                  .filter((subject) => {
+                    const blocks = Array.isArray(subject.blocks) ? subject.blocks : []
+                    const isBlokkfag = blocks.length > 0 && blocks.some((block) => !block.toLowerCase().includes('matte'))
+                    return isBlokkfag && isEligibleBlokkfagSubjectName(subject.name)
+                  })
                   .slice()
                   .sort((a, b) => a.name.localeCompare(b.name))
 
@@ -5216,9 +5313,13 @@ function App() {
                       // Find all subjects that have this block
                       const subjectsInBlock = allSubjects
                         .filter((subject) => subject.blocks && subject.blocks.includes(block))
+                        .filter((subject) => shouldShowBytteOverviewSubject(subject.name))
                         .filter((subject) => (section === 'vg2' ? !isVg3OnlySubject(subject.name) : true))
                         .filter((subject) => (bytteSubjectVisibility[subject.code]?.[section] ?? true))
-                        .sort((a, b) => {
+
+                      if (subjectsInBlock.length === 0) return null
+
+                      subjectsInBlock.sort((a, b) => {
                           const rankDiff = getSubjectSortRank(a.name) - getSubjectSortRank(b.name)
                           if (rankDiff !== 0) {
                             return rankDiff
@@ -5327,8 +5428,9 @@ function App() {
                       </h3>
                       {bytteOptionsExpanded && (
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(128px, 1fr))', gap: '0.4rem', maxHeight: '220px', overflowY: 'auto' }}>
-                          {allSubjects.map((subject) => {
-                            const visibility = bytteSubjectVisibility[subject.code] ?? { vg2: true, vg3: true }
+                          {allSubjects.filter((subject) => shouldShowBytteOptionForSubject(subject.name)).map((subject) => {
+                            const defaultVisibility = getDefaultBytteVisibilityForSubject(subject.name)
+                            const visibility = bytteSubjectVisibility[subject.code] ?? defaultVisibility
                             const isVg3Only = isVg3OnlySubject(subject.name)
                             return (
                               <div key={`${subject.code}-row`} style={{ border: '1px solid #d0d7de', borderRadius: '6px', padding: '0.35rem 0.4rem', backgroundColor: '#fff' }}>
@@ -5346,7 +5448,7 @@ function App() {
                                           setBytteSubjectVisibility((previous) => ({
                                             ...previous,
                                             [subject.code]: {
-                                              ...(previous[subject.code] ?? { vg2: true, vg3: true }),
+                                                ...(previous[subject.code] ?? defaultVisibility),
                                               vg2: checked,
                                             },
                                           }))
@@ -5364,7 +5466,7 @@ function App() {
                                         setBytteSubjectVisibility((previous) => ({
                                           ...previous,
                                           [subject.code]: {
-                                            ...(previous[subject.code] ?? { vg2: true, vg3: true }),
+                                            ...(previous[subject.code] ?? defaultVisibility),
                                             vg3: checked,
                                           },
                                         }))
