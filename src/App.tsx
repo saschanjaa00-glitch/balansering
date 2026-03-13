@@ -139,6 +139,10 @@ const CUSTOM_SUBJECT_BLOCKS: Record<string, string> = {
   '3TY5': 'Blokk 1',
 }
 
+const CUSTOM_SUBJECT_NAMES: Record<string, string> = {
+  '3ENB5': 'Entreprenørskap og bedriftsutvikling 2',
+}
+
 const EXCLUDED_GROUPS = new Set<string>([
   '2BID5A',
 ])
@@ -2028,7 +2032,7 @@ function parseNovaschemExport(rawText: string, sourceFileName: string): ParsedDa
     if (!subjectCode || !block || EXCLUDED_SUBJECTS.has(subjectCode)) {
       return
     }
-    const subjectName = subjectsByCode.get(subjectCode) || subjectCode
+    const subjectName = subjectsByCode.get(subjectCode) || CUSTOM_SUBJECT_NAMES[subjectCode] || subjectCode
     if (!isEligibleBlokkfagSubjectName(subjectName)) {
       return
     }
@@ -2095,9 +2099,6 @@ function parseNovaschemExport(rawText: string, sourceFileName: string): ParsedDa
     if (EXCLUDED_SUBJECTS.has(subjectCode)) {
       return
     }
-    if (!subjectsByCode.has(subjectCode)) {
-      return
-    }
 
     const pairKey = `${subjectCode}|${groupCode}`
     if (taSubjectGroupPairs.has(pairKey)) {
@@ -2110,7 +2111,7 @@ function parseNovaschemExport(rawText: string, sourceFileName: string): ParsedDa
 
     const assignment: Assignment = {
       subjectCode,
-      subjectName: subjectsByCode.get(subjectCode) || subjectCode,
+      subjectName: subjectsByCode.get(subjectCode) || CUSTOM_SUBJECT_NAMES[subjectCode] || CUSTOM_SUBJECT_NAMES[subjectCode] || subjectCode,
       groupCode,
       block: inferredBlock,
     }
@@ -2132,7 +2133,7 @@ function parseNovaschemExport(rawText: string, sourceFileName: string): ParsedDa
     }
 
     const subjectCode = suffixMatch[1]
-    if (EXCLUDED_SUBJECTS.has(subjectCode) || !subjectsByCode.has(subjectCode)) {
+    if (EXCLUDED_SUBJECTS.has(subjectCode)) {
       return
     }
 
